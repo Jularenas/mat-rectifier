@@ -1,0 +1,727 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mat Rectifier</title>
+<style>
+  :root {
+    --bg: #f5f5f2; --panel: #ffffff; --ink: #1d1f1e; --muted: #6b716e;
+    --line: #dcdfdc; --accent: #1f7a5c; --accent-ink: #ffffff; --warn: #b4532a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #151716; --panel: #1f2321; --ink: #e8ebe9; --muted: #9aa29e;
+            --line: #333936; --accent: #3fb68b; --accent-ink: #0d1411; --warn: #e48a5f; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+           padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 16px; margin: 0 12px 0 0; }
+  #status { color: var(--muted); font-size: 13px; }
+  #status.warn { color: var(--warn); font-weight: 600; }
+  button, select, input[type=number] {
+    font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 5px 10px; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+  button:disabled { opacity: .45; cursor: default; }
+  input[type=number] { width: 72px; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; padding: 16px; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; min-width: 0; }
+  section h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 8px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .row label { display: inline-flex; gap: 6px; align-items: center; }
+  #drop { border: 2px dashed var(--line); border-radius: 10px; padding: 28px 12px; text-align: center;
+          color: var(--muted); cursor: pointer; }
+  #drop.over { border-color: var(--accent); color: var(--accent); }
+  #editorWrap { position: relative; touch-action: none; }
+  #editor { width: 100%; display: block; border-radius: 6px; cursor: crosshair; }
+  #loupe { position: fixed; width: 180px; height: 180px; border: 2px solid var(--accent); border-radius: 50%;
+           pointer-events: none; display: none; z-index: 10; background: #000; }
+  #resultScroll { overflow: auto; max-height: 78vh; border-radius: 6px; background: repeating-conic-gradient(#8882 0 25%, transparent 0 50%) 0 0/16px 16px; }
+  #resultStack { position: relative; transform-origin: 0 0; }
+  #resultStack canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
+  #outCanvas { position: relative !important; }
+  details { margin-top: 10px; }
+  details summary { cursor: pointer; color: var(--muted); }
+  .hint { color: var(--muted); font-size: 12px; }
+  .info { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Mat Rectifier</h1>
+  <button id="prevBtn" disabled>‹</button>
+  <span id="fileLabel" class="info">No images</span>
+  <button id="nextBtn" disabled>›</button>
+  <span id="status">Loading OpenCV…</span>
+</header>
+
+<main>
+  <section>
+    <h2>1 · Photo</h2>
+    <div id="drop">Drop photos here or click to choose<input id="fileInput" type="file" accept="image/*" multiple hidden></div>
+    <div id="editorWrap" hidden><canvas id="editor"></canvas></div>
+    <div class="row" style="margin-top:8px">
+      <label>Method <select id="mode">
+        <option value="grid">Auto: printed grid</option>
+        <option value="corners">Manual: 4 mat corners</option></select></label>
+      <label>Crop <select id="crop">
+        <option value="grid">Visible mat, on grid lines</option>
+        <option value="edge">Whole mat, outer edge</option></select></label>
+    </div>
+    <div class="row">
+      <button id="detectBtn" disabled>Detect again</button>
+      <button id="rotateBtn" disabled title="Rotate output 90° clockwise">Rotate 90°</button>
+      <label><input type="checkbox" id="showMask"> Show green mask</label>
+      <label><input type="checkbox" id="showPts" checked> Show grid points</label>
+    </div>
+    <div class="info" id="detInfo"></div>
+    <p class="hint" id="hint"></p>
+
+    <details id="settings">
+      <summary>Settings</summary>
+      <div class="row" style="margin-top:8px">
+        <label>Mat long side (cm) <input type="number" id="matLong" step="0.1"></label>
+        <label>short side (cm) <input type="number" id="matShort" step="0.1"></label>
+        <span class="hint">used by the manual corners method</span>
+      </div>
+      <div class="row">
+        <label>px per cm <input type="number" id="pxcm" min="5" max="120" step="1"></label>
+        <span class="info" id="dpiInfo"></span>
+      </div>
+      <div class="row">
+        <label>Format <select id="format"><option value="png">PNG</option><option value="jpeg">JPEG (95%)</option></select></label>
+      </div>
+      <div class="row">
+        <label>Green H min <input type="number" id="hmin" min="0" max="180"></label>
+        <label>H max <input type="number" id="hmax" min="0" max="180"></label>
+        <label>S min <input type="number" id="smin" min="0" max="255"></label>
+        <label>V min <input type="number" id="vmin" min="0" max="255"></label>
+        <label>V max <input type="number" id="vmax" min="0" max="255"></label>
+      </div>
+      <button id="resetSettings">Reset defaults</button>
+    </details>
+  </section>
+
+  <section>
+    <h2>2 · Rectified result</h2>
+    <div class="row">
+      <button id="warpBtn" class="primary" disabled>Rectify</button>
+      <button id="downloadBtn" disabled>Download</button>
+      <label>Zoom <select id="zoom">
+        <option value="fit">Fit</option><option value="0.25">25%</option><option value="0.5">50%</option>
+        <option value="1">100%</option><option value="2">200%</option></select></label>
+      <label><input type="checkbox" id="showGrid" checked> 1 cm grid</label>
+    </div>
+    <div class="row">
+      <label>Grid offset X (mm) <input type="number" id="gridOffX" step="0.5" value="0"></label>
+      <label>Y (mm) <input type="number" id="gridOffY" step="0.5" value="0"></label>
+      <span class="hint">preview only, for checking alignment</span>
+    </div>
+    <div class="info" id="outInfo"></div>
+    <div id="resultScroll"><div id="resultStack"><canvas id="outCanvas"></canvas><canvas id="gridCanvas"></canvas></div></div>
+  </section>
+</main>
+<canvas id="loupe" width="180" height="180"></canvas>
+
+<script src="grid.js"></script>
+<script>
+'use strict';
+// ---------- settings ----------
+const DEFAULTS = { mode: 'grid', crop: 'grid', matLong: 120, matShort: 45, pxcm: 50, format: 'png',
+                   hmin: 60, hmax: 100, smin: 50, vmin: 40, vmax: 235 };
+const SETTING_KEYS = Object.keys(DEFAULTS);
+const REANALYSE = new Set(['mode', 'crop', 'hmin', 'hmax', 'smin', 'vmin', 'vmax']);
+let settings = { ...DEFAULTS };
+try { Object.assign(settings, JSON.parse(localStorage.getItem('matRectifier.settings') || '{}')); } catch (e) {}
+const $ = id => document.getElementById(id);
+
+function saveSettings() {
+  try { localStorage.setItem('matRectifier.settings', JSON.stringify(settings)); } catch (e) {}
+}
+function syncSettingsUI() {
+  for (const k of SETTING_KEYS) $(k).value = settings[k];
+  $('dpiInfo').textContent = `= ${+(settings.pxcm * 2.54).toFixed(3)} DPI`;
+  $('hint').textContent = settings.mode === 'grid'
+    ? 'The page measures the printed 1 cm grid itself (cyan dots), so the mat does not need to be fully in the photo and slight lens bending is corrected.'
+    : 'Drag the 4 points onto the outer corners of the mat. A magnifier appears while dragging. Shoot from straight above for best results.';
+}
+for (const k of SETTING_KEYS) {
+  $(k).addEventListener('change', () => {
+    const el = $(k);
+    settings[k] = el.type === 'number' ? parseFloat(el.value) || DEFAULTS[k] : el.value;
+    saveSettings(); syncSettingsUI();
+    const f = cur(); if (!f || !cvReady) return;
+    if (REANALYSE.has(k)) { files.forEach(x => (x.analysed = false)); analyse(f); }
+    drawEditor(); render();
+  });
+}
+$('resetSettings').onclick = () => { settings = { ...DEFAULTS }; saveSettings(); syncSettingsUI(); };
+syncSettingsUI();
+
+// ---------- state ----------
+let cvReady = false;
+// file: { name, bitmap, analysed, grid (Grid.detect result), quad [[x,y]×4 TL,TR,BR,BL] full-res,
+//         quadAuto, quadInside, rot (quarter turns), out {w,h}, method, note }
+const files = [];
+let idx = -1;
+const cur = () => files[idx];
+
+function setStatus(msg, warn = false) { const s = $('status'); s.textContent = msg; s.className = warn ? 'warn' : ''; }
+
+// ---------- OpenCV loading ----------
+function initCv() {
+  const done = () => { cvReady = true; setStatus('Ready. Load a photo.'); updateButtons(); if (cur()) select(idx); };
+  if (window.cv instanceof Promise) { window.cv.then(m => { window.cv = m; done(); }); return; }
+  const t0 = Date.now();
+  const poll = setInterval(() => {
+    if (window.cv && window.cv.Mat) { clearInterval(poll); done(); }
+    else if (Date.now() - t0 > 30000) { clearInterval(poll); setStatus('Could not load OpenCV (offline?).', true); }
+  }, 100);
+}
+
+// ---------- file loading ----------
+const drop = $('drop');
+drop.onclick = () => $('fileInput').click();
+$('fileInput').onchange = e => addFiles(e.target.files);
+drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('over'); addFiles(e.dataTransfer.files); });
+document.addEventListener('dragover', e => e.preventDefault());
+document.addEventListener('drop', e => { e.preventDefault(); if (e.target !== drop) addFiles(e.dataTransfer.files); });
+
+async function addFiles(list) {
+  const first = files.length;
+  for (const f of list) {
+    if (!f.type.startsWith('image/')) continue;
+    const bitmap = await createImageBitmap(f, { imageOrientation: 'from-image' });
+    files.push({ name: f.name.replace(/\.[^.]+$/, ''), bitmap, analysed: false, grid: null, quad: null, rot: 0, out: null });
+  }
+  if (files.length > first) select(first);
+}
+
+function select(i) {
+  idx = i;
+  const f = cur();
+  $('fileLabel').textContent = `${idx + 1}/${files.length} · ${f.name}`;
+  $('editorWrap').hidden = false;
+  drop.style.padding = '10px';
+  if (cvReady && !f.analysed) analyse(f);
+  drawEditor();
+  if (cvReady) render(); else clearResult();
+  updateButtons();
+}
+$('prevBtn').onclick = () => idx > 0 && select(idx - 1);
+$('nextBtn').onclick = () => idx < files.length - 1 && select(idx + 1);
+
+function updateButtons() {
+  const has = !!cur();
+  $('prevBtn').disabled = idx <= 0;
+  $('nextBtn').disabled = idx >= files.length - 1;
+  for (const b of ['detectBtn', 'rotateBtn', 'warpBtn']) $(b).disabled = !(has && cvReady);
+  $('downloadBtn').disabled = !(has && cur().out);
+}
+
+// ---------- geometry helpers ----------
+const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+
+// Total-least-squares line fit: returns {p:[x,y], d:[dx,dy]} (d unit vector)
+function fitLine(pts) {
+  let mx = 0, my = 0;
+  for (const p of pts) { mx += p[0]; my += p[1]; }
+  mx /= pts.length; my /= pts.length;
+  let sxx = 0, syy = 0, sxy = 0;
+  for (const p of pts) { const dx = p[0] - mx, dy = p[1] - my; sxx += dx * dx; syy += dy * dy; sxy += dx * dy; }
+  const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+  return { p: [mx, my], d: [Math.cos(ang), Math.sin(ang)] };
+}
+const lineResid = (L, q) => Math.abs((q[0] - L.p[0]) * L.d[1] - (q[1] - L.p[1]) * L.d[0]);
+function robustFit(pts) {
+  let L = fitLine(pts);
+  for (let k = 0; k < 2; k++) {
+    const r = pts.map(q => lineResid(L, q));
+    const med = [...r].sort((a, b) => a - b)[r.length >> 1];
+    const keep = pts.filter((q, j) => r[j] <= Math.max(1, 2.5 * med));
+    if (keep.length < 10) break;
+    L = fitLine(keep);
+  }
+  return L;
+}
+// RANSAC: the line through the largest set of points within `th` px (deterministic PRNG)
+function ransacLine(pts, th) {
+  let seed = 12345; const rnd = () => ((seed = (seed * 1103515245 + 12345) >>> 0) / 4294967296);
+  let best = [];
+  for (let it = 0; it < 400; it++) {
+    const a = pts[Math.floor(rnd() * pts.length)], b = pts[Math.floor(rnd() * pts.length)];
+    const len = dist(a, b); if (len < 20) continue;
+    const L = { p: a, d: [(b[0] - a[0]) / len, (b[1] - a[1]) / len] };
+    const inl = pts.filter(q => lineResid(L, q) <= th);
+    if (inl.length > best.length) best = inl;
+  }
+  return best.length >= 10 ? best : pts;
+}
+function intersect(L1, L2) {
+  const [x1, y1] = L1.p, [dx1, dy1] = L1.d, [x2, y2] = L2.p, [dx2, dy2] = L2.d;
+  const den = dx1 * dy2 - dy1 * dx2;
+  if (Math.abs(den) < 1e-9) return null;
+  const t = ((x2 - x1) * dy2 - (y2 - y1) * dx2) / den;
+  return [x1 + t * dx1, y1 + t * dy1];
+}
+
+// ---------- detection ----------
+function greenMask(srcRGBA) {
+  const rgb = new cv.Mat(), hsv = new cv.Mat(), mask = new cv.Mat();
+  cv.cvtColor(srcRGBA, rgb, cv.COLOR_RGBA2RGB);
+  cv.cvtColor(rgb, hsv, cv.COLOR_RGB2HSV);
+  const lo = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [settings.hmin, settings.smin, settings.vmin, 0]);
+  const hi = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [settings.hmax, 255, settings.vmax, 0]);
+  cv.inRange(hsv, lo, hi, mask);
+  // close the white grid lines / printed text, then remove specks
+  const kc = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(9, 9));
+  const ko = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(5, 5));
+  cv.morphologyEx(mask, mask, cv.MORPH_CLOSE, kc);
+  cv.morphologyEx(mask, mask, cv.MORPH_OPEN, ko);
+  [rgb, hsv, lo, hi, kc, ko].forEach(m => m.delete());
+  return mask;
+}
+
+function smallCanvas(bitmap, maxDim) {
+  const sc = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
+  const c = document.createElement('canvas');
+  c.width = Math.round(bitmap.width * sc); c.height = Math.round(bitmap.height * sc);
+  c.getContext('2d').drawImage(bitmap, 0, 0, c.width, c.height);
+  return { c, sc: c.width / bitmap.width };
+}
+
+function detectQuad(bitmap) {
+  const { c, sc } = smallCanvas(bitmap, 1000);
+  const src = cv.imread(c);
+  const mask = greenMask(src);
+  const contours = new cv.MatVector(), hier = new cv.Mat();
+  cv.findContours(mask, contours, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE);
+  let best = -1, bestA = 0;
+  for (let i = 0; i < contours.size(); i++) {
+    const a = cv.contourArea(contours.get(i));
+    if (a > bestA) { bestA = a; best = i; }
+  }
+  let quad = null;
+  if (best >= 0 && bestA > 0.05 * c.width * c.height) {
+    const cnt = contours.get(best);
+    const pts = [];
+    for (let i = 0; i < cnt.data32S.length; i += 2) pts.push([cnt.data32S[i], cnt.data32S[i + 1]]);
+    const hull = new cv.Mat();
+    cv.convexHull(cnt, hull, false, true);
+    const hp = [];
+    for (let i = 0; i < hull.data32S.length; i += 2) hp.push([hull.data32S[i], hull.data32S[i + 1]]);
+    hull.delete();
+    // initial corners: extremes of x+y / x−y over the hull (robust to chopped corners)
+    const pick = f => hp.reduce((b, p) => (f(p) > f(b) ? p : b));
+    let q = [pick(p => -(p[0] + p[1])), pick(p => p[0] - p[1]), pick(p => p[0] + p[1]), pick(p => p[1] - p[0])];
+    // refine: fit a line to each edge from contour points near it, intersect neighbouring lines.
+    // Occlusions (weights, chair legs) make the contour dip inward, so those points are rejected.
+    const diag = Math.hypot(c.width, c.height);
+    for (const tol of [0.02 * diag, 0.008 * diag, 0.004 * diag]) {
+      const lines = [], seeds = [], nears = [];
+      for (let s = 0; s < 4; s++) {
+        const a = q[s], b = q[(s + 1) % 4], len = dist(a, b);
+        const L0 = { p: a, d: [(b[0] - a[0]) / len, (b[1] - a[1]) / len] };
+        const tOf = p => ((p[0] - a[0]) * L0.d[0] + (p[1] - a[1]) * L0.d[1]) / len;
+        const near = pts.filter(p => { const t = tOf(p); return t > 0.04 && t < 0.96 && lineResid(L0, p) < Math.max(2, tol); });
+        // Occluders (weights, chair legs) bend the outline inward; RANSAC keeps the straight run.
+        const inl = near.length >= 15 ? ransacLine(near, 1.5) : near;
+        near.length = 0; near.push(...inl);
+        const ts = near.map(tOf);
+        const cover = ts.length ? Math.max(...ts) - Math.min(...ts) : 0;
+        seeds.push(L0); nears.push(near);
+        // an edge mostly hidden (weights along it) can't give a reliable angle by itself
+        lines.push(near.length >= 15 && cover >= 0.25 ? robustFit(near) : null);
+      }
+      for (let s = 0; s < 4; s++) {
+        if (lines[s]) continue;
+        const opp = lines[(s + 2) % 4], L0 = seeds[s], near = nears[s];
+        if (!opp) { lines[s] = L0; continue; }
+        // borrow the opposite edge's direction, keep the visible points as the anchor
+        const d = opp.d, n = [-d[1], d[0]];
+        const offs = near.map(p => (p[0] - L0.p[0]) * n[0] + (p[1] - L0.p[1]) * n[1]).sort((x, y) => x - y);
+        const o = offs.length ? offs[offs.length >> 1] : 0;
+        lines[s] = { p: [L0.p[0] + n[0] * o, L0.p[1] + n[1] * o], d };
+      }
+      const nq = [];
+      for (let s = 0; s < 4; s++) nq.push(intersect(lines[(s + 3) % 4], lines[s]));
+      if (nq.some(p => !p)) break;
+      q = nq;
+    }
+    // CHAIN_APPROX_NONE points are pixel centres of the outermost mask pixels; push 0.5px outward
+    quad = q.map(p => [(p[0] + 0.5) / sc, (p[1] + 0.5) / sc]);
+  }
+  src.delete(); mask.delete(); contours.delete(); hier.delete();
+  return quad;
+}
+
+// ---------- analysis ----------
+function detectCorners(f) {
+  let q = null;
+  try { q = detectQuad(f.bitmap); } catch (e) { console.error(e); }
+  const W = f.bitmap.width, H = f.bitmap.height;
+  if (q && q.every(p => p[0] > -0.1 * W && p[0] < 1.1 * W && p[1] > -0.1 * H && p[1] < 1.1 * H)) {
+    f.quad = q; f.quadAuto = true;
+    // corners hugging the photo border mean the mat continues outside the frame
+    const m = 0.006 * Math.max(W, H);
+    f.quadInside = q.every(p => p[0] > m && p[1] > m && p[0] < W - m && p[1] < H - m);
+  } else {
+    const m = 0.08;
+    f.quad = [[W * m, H * m], [W * (1 - m), H * m], [W * (1 - m), H * (1 - m)], [W * m, H * (1 - m)]];
+    f.quadAuto = false; f.quadInside = false;
+  }
+}
+
+function analyse(f) {
+  f.analysed = true; f.grid = null; f.quad = null; f.note = '';
+  if (settings.mode === 'grid') {
+    try { f.grid = Grid.detect(f.bitmap, greenMask); }
+    catch (e) { console.error(e); f.grid = { ok: false, reason: 'error: ' + e.message }; }
+    if (!f.grid.ok) f.note = `Printed grid not found (${f.grid.reason}). Using the 4-corner method instead.`;
+  }
+  if (settings.mode === 'corners' || settings.crop === 'edge' || !f.grid.ok) detectCorners(f);
+  if (settings.mode === 'grid' && f.grid.ok && settings.crop === 'edge' && !(f.quadAuto && f.quadInside))
+    f.note = 'The whole mat is not visible in this photo, so it is cropped to the visible grid instead.';
+}
+
+function method(f) {
+  if (settings.mode === 'grid' && f.grid && f.grid.ok)
+    return settings.crop === 'edge' && f.quad && (f.quadInside || !f.quadAuto) && !(f.note || '').startsWith('The whole') ? 'grid-edge' : 'grid';
+  return 'corners';
+}
+
+$('detectBtn').onclick = () => { const f = cur(); analyse(f); drawEditor(); render(); };
+$('rotateBtn').onclick = () => { const f = cur(); f.rot = (f.rot + 1) % 4; drawEditor(); render(); };
+
+// conversions between full-res pixel-edge coords (editor / quad) and grid analysis coords
+const toAna = (g, X, Y) => [X * g.sc - 0.5, Y * g.sc - 0.5];
+const fromAna = (g, x, y) => [(x + 0.5) / g.sc, (y + 0.5) / g.sc];
+
+// output rectangle in grid cm coordinates for the current method
+function uvRect(f) {
+  const g = f.grid;
+  if (method(f) === 'grid-edge') {
+    const uv = f.quad.map(p => g.model.inverse(...toAna(g, p[0], p[1])));
+    const us = uv.map(p => p[0]).sort((a, b) => a - b), vs = uv.map(p => p[1]).sort((a, b) => a - b);
+    return { u0: (us[0] + us[1]) / 2, u1: (us[2] + us[3]) / 2, v0: (vs[0] + vs[1]) / 2, v1: (vs[2] + vs[3]) / 2 };
+  }
+  return g.visible;
+}
+
+// ---------- editor ----------
+const editor = $('editor'), ectx = editor.getContext('2d');
+let view = { s: 1 };           // full-res px -> css px
+let maskCache = null;
+let dragging = -1;
+
+function drawEditor() {
+  const f = cur(); if (!f) return;
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = editor.parentElement.clientWidth || 600;
+  const s = Math.min(cssW / f.bitmap.width, (window.innerHeight * 0.75) / f.bitmap.height);
+  view.s = s;
+  const cw = Math.round(f.bitmap.width * s), ch = Math.round(f.bitmap.height * s);
+  editor.style.width = cw + 'px'; editor.style.height = ch + 'px';
+  editor.width = Math.round(cw * dpr); editor.height = Math.round(ch * dpr);
+  ectx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ectx.drawImage(f.bitmap, 0, 0, cw, ch);
+  if ($('showMask').checked && cvReady) {
+    const key = idx + JSON.stringify(settings);
+    if (!maskCache || maskCache.key !== key) {
+      const { c } = smallCanvas(f.bitmap, 1000);
+      const src = cv.imread(c), m = greenMask(src), out = document.createElement('canvas');
+      cv.imshow(out, m); src.delete(); m.delete();
+      maskCache = { key, canvas: out };
+    }
+    ectx.globalAlpha = 0.55; ectx.drawImage(maskCache.canvas, 0, 0, cw, ch); ectx.globalAlpha = 1;
+  }
+  if (!f.analysed) return;
+  const meth = method(f), topSide = (4 - f.rot) % 4;
+  const strokeSides = (sides) => {          // sides: 4 arrays of display points (top, right, bottom, left)
+    ectx.lineWidth = 2; ectx.strokeStyle = '#ff2d95'; ectx.fillStyle = 'rgba(255,45,149,.08)';
+    ectx.beginPath(); sides.flat().forEach((p, i) => i ? ectx.lineTo(...p) : ectx.moveTo(...p)); ectx.closePath();
+    ectx.fill(); ectx.stroke();
+    ectx.lineWidth = 5; ectx.strokeStyle = '#ffd400';
+    ectx.beginPath(); sides[topSide].forEach((p, i) => i ? ectx.lineTo(...p) : ectx.moveTo(...p)); ectx.stroke();
+  };
+  if (meth.startsWith('grid')) {
+    const g = f.grid, M = g.model;
+    if ($('showPts').checked) {
+      ectx.fillStyle = 'rgba(0,229,255,.9)';
+      for (const m of g.matches) { const p = fromAna(g, m.x, m.y); ectx.fillRect(p[0] * s - 1.5, p[1] * s - 1.5, 3, 3); }
+    }
+    const r = uvRect(f), N = 40;
+    const edge = (ua, va, ub, vb) => Array.from({ length: N + 1 }, (_, k) => {
+      const t = k / N, a = M.forward(ua + (ub - ua) * t, va + (vb - va) * t), p = fromAna(g, a[0], a[1]);
+      return [p[0] * s, p[1] * s];
+    });
+    strokeSides([edge(r.u0, r.v0, r.u1, r.v0), edge(r.u1, r.v0, r.u1, r.v1), edge(r.u1, r.v1, r.u0, r.v1), edge(r.u0, r.v1, r.u0, r.v0)]);
+  } else {
+    const q = f.quad.map(p => [p[0] * s, p[1] * s]);
+    strokeSides([[q[0], q[1]], [q[1], q[2]], [q[2], q[3]], [q[3], q[0]]]);
+  }
+  if (meth !== 'grid') {
+    const labels = ['TL', 'TR', 'BR', 'BL'];
+    f.quad.forEach((p0, i) => {
+      const p = [p0[0] * s, p0[1] * s];
+      ectx.beginPath(); ectx.arc(p[0], p[1], 9, 0, Math.PI * 2);
+      ectx.fillStyle = i === dragging ? '#ffd400' : 'rgba(255,255,255,.9)'; ectx.fill();
+      ectx.lineWidth = 2; ectx.strokeStyle = '#ff2d95'; ectx.stroke();
+      ectx.fillStyle = '#ff2d95'; ectx.font = 'bold 11px system-ui';
+      ectx.fillText(labels[i], p[0] + 12, p[1] - 10);
+    });
+  }
+  updateDetInfo(f);
+}
+['showMask', 'showPts'].forEach(id => ($(id).onchange = drawEditor));
+window.addEventListener('resize', () => drawEditor());
+
+function updateDetInfo(f) {
+  const meth = method(f), g = f.grid, lines = [];
+  if (meth.startsWith('grid')) {
+    const v = g.visible;
+    lines.push(`Grid: ${g.matches.length} crossings · fit error ${g.rmsMm.toFixed(2)} mm RMS (95% < ${g.p95Mm.toFixed(2)} mm)` +
+               ` · ${g.spacingPx.toFixed(1)} photo px per cm · lens correction ${g.lam ? g.lam.toFixed(3) : 'none'}` + (g.mesh ? ' · local mesh on' : ''));
+    if (meth === 'grid-edge') { const r = uvRect(f); lines.push(`Mat outer edge measured: ${(r.u1 - r.u0).toFixed(1)} × ${(r.v1 - r.v0).toFixed(1)} cm`); }
+    else lines.push(`Visible mat: ${v.u1 - v.u0} × ${v.v1 - v.v0} cm`);
+  } else lines.push(f.quadAuto ? 'Corners detected automatically. Check them and drag to adjust.' : 'Drag the 4 points to the mat corners.');
+  $('detInfo').innerHTML = lines.map(l => `<div>${l}</div>`).join('');
+  let warn = f.note || '';
+  if (meth.startsWith('grid')) {
+    if (g.rmsMm > 0.8) warn += ` The grid fit is loose (${g.rmsMm.toFixed(1)} mm): the mat may not be flat, or the photo is blurry. Check the overlay.`;
+    if (g.spacingPx < 8) warn += ` Low resolution (${g.spacingPx.toFixed(1)} px per cm): use the original photo or shoot closer.`;
+  }
+  if (warn) setStatus(warn.trim(), true);
+}
+
+function evtToImg(e) {
+  const r = editor.getBoundingClientRect();
+  return [(e.clientX - r.left) / view.s, (e.clientY - r.top) / view.s];
+}
+let dragOffset = [0, 0];
+editor.addEventListener('pointerdown', e => {
+  const f = cur(); if (!f || !f.quad || method(f) === 'grid') return;
+  const p = evtToImg(e);
+  let bi = -1, bd = 28 / view.s;
+  f.quad.forEach((q, i) => { const d = dist(p, q); if (d < bd) { bd = d; bi = i; } });
+  if (bi < 0) return;
+  dragging = bi; editor.setPointerCapture(e.pointerId);
+  dragOffset = [f.quad[bi][0] - p[0], f.quad[bi][1] - p[1]];
+  drawLoupe(e); drawEditor();
+});
+editor.addEventListener('pointermove', e => {
+  if (dragging < 0) return;
+  const p = evtToImg(e), f = cur();
+  f.quad[dragging] = [p[0] + dragOffset[0], p[1] + dragOffset[1]];
+  f.quadAuto = false;
+  drawEditor(); drawLoupe(e);
+});
+const endDrag = () => { if (dragging < 0) return; dragging = -1; $('loupe').style.display = 'none'; drawEditor(); render(); };
+editor.addEventListener('pointerup', endDrag);
+editor.addEventListener('pointercancel', endDrag);
+
+function drawLoupe(e) {
+  const L = $('loupe'), lc = L.getContext('2d'), f = cur(), pt = f.quad[dragging];
+  const Z = 6, R = 90;
+  L.style.display = 'block';
+  L.style.left = Math.min(window.innerWidth - 190, e.clientX + 30) + 'px';
+  L.style.top = Math.max(10, e.clientY - 210) + 'px';
+  lc.imageSmoothingEnabled = false;
+  lc.fillStyle = '#000'; lc.fillRect(0, 0, 180, 180);
+  lc.drawImage(f.bitmap, pt[0] - R / Z, pt[1] - R / Z, 2 * R / Z, 2 * R / Z, 0, 0, 180, 180);
+  lc.strokeStyle = '#ff2d95'; lc.lineWidth = 1;
+  lc.beginPath(); lc.moveTo(90, 0); lc.lineTo(90, 180); lc.moveTo(0, 90); lc.lineTo(180, 90); lc.stroke();
+}
+
+// ---------- rectify ----------
+const outCanvas = $('outCanvas'), gridCanvas = $('gridCanvas');
+
+function fullResMat(f) {
+  const full = document.createElement('canvas');
+  full.width = f.bitmap.width; full.height = f.bitmap.height;
+  full.getContext('2d').drawImage(f.bitmap, 0, 0);
+  return cv.imread(full);
+}
+
+// grid method: every output pixel → (u,v) cm → photo pixel through the fitted model
+function renderGrid(f, r) {
+  const S = settings.pxcm, g = f.grid, M = g.model, sc = g.sc;
+  const W = Math.round((r.u1 - r.u0) * S), H = Math.round((r.v1 - r.v0) * S);
+  if (W * H > 150e6 || W < 1 || H < 1) throw new Error(`output would be ${W}×${H} px`);
+  const src = fullResMat(f);
+  const base = document.createElement('canvas'); base.width = W; base.height = H;
+  const bctx = base.getContext('2d');
+  const STRIP = 256;
+  for (let y0 = 0; y0 < H; y0 += STRIP) {
+    const rows = Math.min(STRIP, H - y0);
+    const mx = new cv.Mat(rows, W, cv.CV_32FC1), my = new cv.Mat(rows, W, cv.CV_32FC1);
+    Grid.fillMaps(M, r, S, y0, rows, W, mx.data32F, my.data32F, sc);
+    const dst = new cv.Mat();
+    cv.remap(src, dst, mx, my, cv.INTER_CUBIC, cv.BORDER_CONSTANT, new cv.Scalar(0, 0, 0, 0));
+    bctx.putImageData(new ImageData(new Uint8ClampedArray(dst.data), W, rows), 0, y0);
+    [mx, my, dst].forEach(m => m.delete());
+  }
+  src.delete();
+  return { base, wcm: r.u1 - r.u0, hcm: r.v1 - r.v0, offX: Math.ceil(r.u0) - r.u0, offY: Math.ceil(r.v0) - r.v0 };
+}
+
+// manual method: plain 4-corner perspective warp to the mat size
+function renderCorners(f) {
+  const q = f.quad, S = settings.pxcm;
+  const horiz = (dist(q[0], q[1]) + dist(q[3], q[2])) / 2, vert = (dist(q[0], q[3]) + dist(q[1], q[2])) / 2;
+  const [wcm, hcm] = horiz < vert ? [settings.matShort, settings.matLong] : [settings.matLong, settings.matShort];
+  const w = Math.round(wcm * S), h = Math.round(hcm * S);
+  const src = fullResMat(f), dst = new cv.Mat();
+  // corners of the quad are pixel *edges*; OpenCV maps pixel centres, hence the −0.5 shifts
+  const sp = cv.matFromArray(4, 1, cv.CV_32FC2, q.flatMap(p => [p[0] - 0.5, p[1] - 0.5]));
+  const dp = cv.matFromArray(4, 1, cv.CV_32FC2, [-0.5, -0.5, w - 0.5, -0.5, w - 0.5, h - 0.5, -0.5, h - 0.5]);
+  const Mx = cv.getPerspectiveTransform(sp, dp);
+  cv.warpPerspective(src, dst, Mx, new cv.Size(w, h), cv.INTER_LANCZOS4, cv.BORDER_REPLICATE, new cv.Scalar());
+  const base = document.createElement('canvas');
+  cv.imshow(base, dst);
+  [src, dst, sp, dp, Mx].forEach(m => m.delete());
+  return { base, wcm, hcm, offX: null, offY: null };
+}
+
+function render() {
+  const f = cur(); if (!f || !cvReady || !f.analysed) return;
+  setStatus('Rectifying…');
+  setTimeout(() => {            // let the status message paint first
+    const t0 = performance.now(), meth = method(f);
+    let res;
+    try { res = meth === 'corners' ? renderCorners(f) : renderGrid(f, uvRect(f)); }
+    catch (e) { console.error(e); setStatus('Could not rectify: ' + e.message, true); return; }
+    // rotate by quarter turns
+    const { base } = res, r = f.rot;
+    const w = r % 2 ? base.height : base.width, h = r % 2 ? base.width : base.height;
+    outCanvas.width = w; outCanvas.height = h;
+    const ctx = outCanvas.getContext('2d');
+    ctx.save(); ctx.translate(w / 2, h / 2); ctx.rotate(r * Math.PI / 2); ctx.drawImage(base, -base.width / 2, -base.height / 2); ctx.restore();
+    f.out = { w, h };
+    // where the first printed grid line sits (preview overlay), following the rotation
+    if (res.offX !== null) {
+      let ox = res.offX, oy = res.offY, wc = res.wcm, hc = res.hcm;
+      for (let k = 0; k < r; k++) { [ox, oy] = [(((hc - oy) % 1) + 1) % 1, ox]; [wc, hc] = [hc, wc]; }
+      $('gridOffX').value = +(ox * 10).toFixed(2); $('gridOffY').value = +(oy * 10).toFixed(2);
+    }
+    const [wcm, hcm] = r % 2 ? [res.hcm, res.wcm] : [res.wcm, res.hcm];
+    applyZoom();
+    $('outInfo').textContent = `${w}×${h} px · ${+wcm.toFixed(2)}×${+hcm.toFixed(2)} cm · ${settings.pxcm} px/cm · ${+(settings.pxcm * 2.54).toFixed(3)} DPI`;
+    setStatus(`Rectified in ${Math.round(performance.now() - t0)} ms.`);
+    updateDetInfo(f);
+    updateButtons();
+  }, 20);
+}
+$('warpBtn').onclick = render;
+
+function clearResult() {
+  outCanvas.width = outCanvas.height = 0; gridCanvas.width = gridCanvas.height = 0;
+  $('outInfo').textContent = ''; updateButtons();
+}
+
+let viewScale = 1;   // output px -> css px
+// Grid is drawn at screen resolution so 1 cm lines don't alias when zoomed out.
+function drawGrid() {
+  const f = cur(); if (!f || !f.out) return;
+  // output px -> grid canvas px, capped to stay within browser canvas limits
+  const k = Math.min(viewScale * (window.devicePixelRatio || 1), 12000 / Math.max(f.out.w, f.out.h));
+  const w = Math.round(f.out.w * k), h = Math.round(f.out.h * k);
+  gridCanvas.width = w; gridCanvas.height = h;
+  const g = gridCanvas.getContext('2d');
+  if (!$('showGrid').checked) return;
+  const S = settings.pxcm * k;
+  const ox = (parseFloat($('gridOffX').value) || 0) / 10 * S, oy = (parseFloat($('gridOffY').value) || 0) / 10 * S;
+  const pass = (step, color, width) => {
+    g.strokeStyle = color; g.lineWidth = width; g.beginPath();
+    for (let x = ((ox % step) + step) % step; x <= w + 0.5; x += step) { g.moveTo(x, 0); g.lineTo(x, h); }
+    for (let y = ((oy % step) + step) % step; y <= h + 0.5; y += step) { g.moveTo(0, y); g.lineTo(w, y); }
+    g.stroke();
+  };
+  if (S >= 4) pass(S, 'rgba(255,0,150,.6)', Math.max(1, Math.min(2, S / 30)));
+  pass(S * 10, 'rgba(255,0,150,.95)', Math.max(1.5, Math.min(4, S / 12)));
+}
+['showGrid', 'gridOffX', 'gridOffY'].forEach(id => $(id).addEventListener('input', drawGrid));
+
+function applyZoom() {
+  const f = cur(); if (!f || !f.out) return;
+  const z = $('zoom').value, stack = $('resultStack'), box = $('resultScroll');
+  viewScale = z === 'fit' ? Math.min((box.clientWidth - 2) / f.out.w, (window.innerHeight * 0.78) / f.out.h) : parseFloat(z);
+  stack.style.width = f.out.w * viewScale + 'px'; stack.style.height = f.out.h * viewScale + 'px';
+  outCanvas.style.width = '100%'; outCanvas.style.height = '100%';
+  outCanvas.style.imageRendering = viewScale >= 1 ? 'pixelated' : 'auto';
+  drawGrid();
+}
+$('zoom').onchange = applyZoom;
+window.addEventListener('resize', applyZoom);
+
+// ---------- export with DPI metadata ----------
+const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+function crc32(bytes) { let c = 0xFFFFFFFF; for (const b of bytes) c = CRC_TABLE[(c ^ b) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+
+function pngWithDpi(buf, pxPerCm) {
+  const src = new Uint8Array(buf);
+  const ppm = Math.round(pxPerCm * 100);
+  const chunk = new Uint8Array(21), dv = new DataView(chunk.buffer);
+  dv.setUint32(0, 9); chunk.set([0x70, 0x48, 0x59, 0x73], 4);       // "pHYs"
+  dv.setUint32(8, ppm); dv.setUint32(12, ppm); chunk[16] = 1;        // unit: metre
+  dv.setUint32(17, crc32(chunk.subarray(4, 17)));
+  // strip any existing pHYs, insert ours right after IHDR (8 sig + 25 IHDR)
+  const parts = [src.subarray(0, 33), chunk];
+  let off = 33;
+  while (off < src.length) {
+    const len = new DataView(src.buffer, off, 4).getUint32(0);
+    const type = String.fromCharCode(...src.subarray(off + 4, off + 8));
+    if (type !== 'pHYs') parts.push(src.subarray(off, off + 12 + len));
+    off += 12 + len;
+  }
+  return new Blob(parts, { type: 'image/png' });
+}
+
+function jpegWithDpi(buf, pxPerCm) {
+  const b = new Uint8Array(buf);
+  const dpi = Math.round(pxPerCm * 2.54);
+  // Canvas JPEGs start with SOI + JFIF APP0; patch density fields
+  if (b[2] === 0xFF && b[3] === 0xE0 && String.fromCharCode(...b.subarray(6, 10)) === 'JFIF') {
+    b[13] = 1; b[14] = dpi >> 8; b[15] = dpi & 255; b[16] = dpi >> 8; b[17] = dpi & 255;
+    return new Blob([b], { type: 'image/jpeg' });
+  }
+  const app0 = new Uint8Array([0xFF, 0xE0, 0, 16, 0x4A, 0x46, 0x49, 0x46, 0, 1, 1, 1, dpi >> 8, dpi & 255, dpi >> 8, dpi & 255, 0, 0]);
+  return new Blob([b.subarray(0, 2), app0, b.subarray(2)], { type: 'image/jpeg' });
+}
+async function exportBlob() {
+  const fmt = settings.format;
+  let c = outCanvas;
+  if (fmt === 'jpeg') {             // JPEG has no transparency: put areas outside the photo on white
+    c = document.createElement('canvas'); c.width = outCanvas.width; c.height = outCanvas.height;
+    const x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height); x.drawImage(outCanvas, 0, 0);
+  }
+  const raw = await new Promise(r => c.toBlob(r, fmt === 'png' ? 'image/png' : 'image/jpeg', 0.95));
+  const buf = await raw.arrayBuffer();
+  return fmt === 'png' ? pngWithDpi(buf, settings.pxcm) : jpegWithDpi(buf, settings.pxcm);
+}
+
+$('downloadBtn').onclick = async () => {
+  const f = cur(); if (!f || !f.out) return;
+  setStatus('Encoding…');
+  const blob = await exportBlob();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `${f.name}_rect_${settings.pxcm}pxcm.${settings.format === 'png' ? 'png' : 'jpg'}`;
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  setStatus(`Downloaded (${(blob.size / 1e6).toFixed(1)} MB).`);
+};
+
+// debug / testing hooks
+window.matRectifier = { files, addFiles, analyse, render, exportBlob, select, get current() { return cur(); } };
+</script>
+<script async src="https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js" onload="initCv()"
+        onerror="setStatus('Could not load OpenCV (offline?).', true)"></script>
+</body>
+</html>
