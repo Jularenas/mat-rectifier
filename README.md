@@ -14,6 +14,7 @@ Turns a phone photo of a pattern piece on the green cutting mat into a flat imag
    - *Visible mat, on grid lines* (default): the image edges sit exactly on printed grid lines, so a Procreate grid starting at the canvas corner matches with no offset.
    - *Whole mat, outer edge*: crops to the mat's physical edges, found as straight lines in the corrected grid, so weights on the corners don't matter. An edge that is completely hidden is placed from the nominal mat size (Settings). The measured size is shown as a sanity check (the sample photos all measure about 44.7 × 119.6 cm).
 5. **Adjust the crop** by dragging any side or corner of the pink outline on the photo; the result follows live. In *on grid lines* mode the sides snap to whole centimetres. **Reset edges** undoes it.
+   - **Zoom in for precision** (up to 16×): the − / + / Fit buttons above the photo, Ctrl/⌘ + scroll or trackpad pinch, or double-click. When zoomed in, drag an empty spot to pan; dragging a handle to the photo's border scrolls along.
 6. Check the result with the **1 cm grid** overlay. The pink lines should sit on the printed lines everywhere. Use **Rotate 90°** if needed.
 7. Click **Download** to get `<name>_rect_50pxcm.png`. The preview is drawn at screen resolution so dragging stays smooth; the download is rendered at full resolution (a couple of seconds).
 
@@ -21,7 +22,7 @@ If the grid can't be found (very blurry or very small mat in the photo), the pag
 
 ## On iPhone / iPad
 - Works in Safari: tap *Tap to choose photos* to pick from Photos or Files (several at once is fine).
-- Drag the pink outline's sides or corners with a finger; swiping elsewhere on the photo scrolls the page. While dragging, a magnifier shows beside your finger and, on narrow screens, a small live copy of the result appears in the corner.
+- Drag the pink outline's sides or corners with a finger. **Pinch** the photo to zoom in on an edge (two fingers also pan), or **double-tap** to zoom in and again to go back. Zoomed in, one finger on an empty spot pans the photo; at normal size, swiping on it scrolls the page. While dragging, a magnifier shows beside your finger and, on narrow screens, a small live copy of the result appears in the corner.
 - **Share…** sends the PNG straight to Procreate, Files or Photos. If the first tap only prepares the file (big images take a couple of seconds), tap Share again.
 - Photos above ~16 megapixels (24/48 MP iPhone shots) are scaled to 16 MP on load, the largest size Safari can process; that is still far more detail than the 50 px/cm output needs.
 

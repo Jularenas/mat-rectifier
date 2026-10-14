@@ -37,7 +37,10 @@
   #drop { border: 2px dashed var(--line); border-radius: 10px; padding: 28px 12px; text-align: center;
           color: var(--muted); cursor: pointer; }
   #drop.over { border-color: var(--accent); color: var(--accent); }
-  #editorWrap { position: relative; }
+  #editorWrap { position: relative; margin-top: 8px; }
+  #zoomBar { gap: 6px; margin-bottom: 6px; }
+  #zoomBar button { min-width: 36px; }
+  #zoomLabel { min-width: 40px; text-align: center; font-variant-numeric: tabular-nums; }
   /* no iOS long-press callout / text selection while dragging handles */
   #editor { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
   button, select, input, label { touch-action: manipulation; }   /* no double-tap zoom on controls */
@@ -75,7 +78,16 @@
   <section>
     <h2>1 · Photo</h2>
     <div id="drop"><span id="dropText">Drop photos here or click to choose</span><input id="fileInput" type="file" accept="image/*" multiple hidden></div>
-    <div id="editorWrap" hidden><canvas id="editor"></canvas></div>
+    <div id="editorWrap" hidden>
+      <div id="zoomBar" class="row">
+        <button id="zoomOutBtn" aria-label="Zoom out">−</button>
+        <span id="zoomLabel">Fit</span>
+        <button id="zoomInBtn" aria-label="Zoom in">+</button>
+        <button id="zoomFitBtn">Fit</button>
+        <span class="hint" id="zoomHint"></span>
+      </div>
+      <canvas id="editor"></canvas>
+    </div>
     <div class="row" style="margin-top:8px">
       <label>Method <select id="mode">
         <option value="grid">Auto: printed grid</option>
@@ -256,6 +268,7 @@ async function addFiles(list) {
 function select(i) {
   idx = i;
   const f = cur();
+  resetView();
   $('fileLabel').textContent = `${idx + 1}/${files.length} · ${f.name}`;
   $('editorWrap').hidden = false;
   drop.style.padding = '10px';
@@ -483,38 +496,75 @@ function uvRect(f) {
 
 // ---------- editor ----------
 const editor = $('editor'), ectx = editor.getContext('2d');
-let view = { s: 1 };           // full-res px -> css px
+// view: photo px → editor css px is  css = img · s · z + (tx, ty).  s fits the photo, z ≥ 1 is the zoom.
+let view = { s: 1, z: 1, tx: 0, ty: 0, cw: 0, ch: 0 };
+const ZMAX = 16;
+const toCss = p => [p[0] * view.s * view.z + view.tx, p[1] * view.s * view.z + view.ty];
+const fromCss = p => [(p[0] - view.tx) / (view.s * view.z), (p[1] - view.ty) / (view.s * view.z)];
 let maskCache = null;
-// drag state: { kind: 'corner', i } (manual corners) or { kind: 'crop', sides: ['u0'|'u1'|'v0'|'v1', ...] }
+// drag state: { kind: 'corner', i } (manual corners), { kind: 'crop', sides: [...] }, { kind: 'pan' } or { kind: 'pinch' }
 let drag = null;
 // fingers need bigger handles and hit areas than a mouse
 const COARSE = window.matchMedia && matchMedia('(pointer: coarse)').matches;
 const HS = COARSE ? 12 : 9, HIT = COARSE ? 30 : 15;
 if (COARSE) $('dropText').textContent = 'Tap to choose photos';
+$('zoomHint').textContent = COARSE ? 'or pinch / double-tap the photo' : 'or Ctrl/⌘ + scroll, double-click; drag to pan';
 
-// crop rectangle sides as polylines in editor css px (grid methods)
+// crop rectangle sides as polylines in editor css px (grid methods); more samples when zoomed in
 function cropSides(f) {
-  const g = f.grid, M = g.model, r = uvRect(f), N = 40, s = view.s;
+  const g = f.grid, M = g.model, r = uvRect(f), N = Math.min(400, Math.round(40 * Math.sqrt(view.z)));
   const edge = (ua, va, ub, vb) => Array.from({ length: N + 1 }, (_, k) => {
-    const t = k / N, a = M.forward(ua + (ub - ua) * t, va + (vb - va) * t), p = fromAna(g, a[0], a[1]);
-    return [p[0] * s, p[1] * s];
+    const t = k / N, a = M.forward(ua + (ub - ua) * t, va + (vb - va) * t);
+    return toCss(fromAna(g, a[0], a[1]));
   });
   return [edge(r.u0, r.v0, r.u1, r.v0), edge(r.u1, r.v0, r.u1, r.v1), edge(r.u1, r.v1, r.u0, r.v1), edge(r.u0, r.v1, r.u0, r.v0)];
+}
+
+// keep the photo covering the editor (no empty margins when zoomed)
+function clampView() {
+  view.z = Math.max(1, Math.min(ZMAX, view.z));
+  const w = view.cw * view.z, h = view.ch * view.z;
+  view.tx = Math.min(0, Math.max(view.cw - w, view.tx));
+  view.ty = Math.min(0, Math.max(view.ch - h, view.ty));
+}
+// zoom to z, keeping editor css point c fixed on screen
+function zoomAt(z, c) {
+  const img = fromCss(c);
+  view.z = Math.max(1, Math.min(ZMAX, z));
+  view.tx = c[0] - img[0] * view.s * view.z; view.ty = c[1] - img[1] * view.s * view.z;
+  clampView(); updateZoomUI(); drawEditor();
+}
+function resetView() { view.z = 1; view.tx = view.ty = 0; updateZoomUI(); }
+function updateZoomUI() {
+  $('zoomLabel').textContent = view.z < 1.05 ? 'Fit' : `${view.z.toFixed(view.z < 10 ? 1 : 0)}×`;
+  $('zoomOutBtn').disabled = view.z <= 1.001; $('zoomInBtn').disabled = view.z >= ZMAX - 0.001;
+  // zoomed in: every gesture on the photo is ours (pan/pinch); at fit, vertical swipes scroll the page
+  editor.style.touchAction = view.z > 1.001 ? 'none' : 'pan-y';
 }
 
 function drawEditor() {
   const f = cur(); if (!f) return;
   const dpr = window.devicePixelRatio || 1;
-  const cssW = editor.parentElement.clientWidth || 600;
+  const cssW = $('editorWrap').clientWidth || 600;
   const s = Math.min(cssW / f.bitmap.width, (window.innerHeight * 0.75) / f.bitmap.height);
+  if (Math.abs(s - view.s) > 1e-9 && view.s) {      // editor resized: keep the same part of the photo in view
+    view.tx *= s / view.s; view.ty *= s / view.s;
+  }
   view.s = s;
   const cw = Math.round(f.bitmap.width * s), ch = Math.round(f.bitmap.height * s);
+  view.cw = cw; view.ch = ch; clampView();
   if (editor.width !== Math.round(cw * dpr) || editor.height !== Math.round(ch * dpr)) {
     editor.style.width = cw + 'px'; editor.style.height = ch + 'px';
     editor.width = Math.round(cw * dpr); editor.height = Math.round(ch * dpr);
   }
+  // photo (and mask) with the zoom transform; overlays are drawn in plain css px on top
+  const k = s * view.z;
   ectx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ectx.drawImage(f.bitmap, 0, 0, cw, ch);
+  ectx.fillStyle = '#000'; ectx.fillRect(0, 0, cw, ch);
+  ectx.setTransform(dpr * k, 0, 0, dpr * k, dpr * view.tx, dpr * view.ty);
+  ectx.imageSmoothingEnabled = k * dpr < 3;            // show real pixels when zoomed far in
+  ectx.drawImage(f.bitmap, 0, 0);
+  ectx.imageSmoothingEnabled = true;
   if ($('showMask').checked && cvReady) {
     const key = idx + JSON.stringify(settings);
     if (!maskCache || maskCache.key !== key) {
@@ -523,30 +573,37 @@ function drawEditor() {
       cv.imshow(out, m); src.delete(); m.delete();
       maskCache = { key, canvas: out };
     }
-    ectx.globalAlpha = 0.55; ectx.drawImage(maskCache.canvas, 0, 0, cw, ch); ectx.globalAlpha = 1;
+    ectx.globalAlpha = 0.55; ectx.drawImage(maskCache.canvas, 0, 0, f.bitmap.width, f.bitmap.height); ectx.globalAlpha = 1;
   }
+  ectx.setTransform(dpr, 0, 0, dpr, 0, 0);
   if (!f.analysed) return;
   const meth = method(f), topSide = (4 - f.rot) % 4;
   const strokeSides = (sides) => {          // sides: 4 arrays of display points (top, right, bottom, left)
-    ectx.lineWidth = 2; ectx.strokeStyle = '#ff2d95'; ectx.fillStyle = 'rgba(255,45,149,.08)';
+    ectx.lineWidth = view.z > 2 ? 1.5 : 2; ectx.strokeStyle = '#ff2d95'; ectx.fillStyle = 'rgba(255,45,149,.08)';
     ectx.beginPath(); sides.flat().forEach((p, i) => i ? ectx.lineTo(...p) : ectx.moveTo(...p)); ectx.closePath();
     ectx.fill(); ectx.stroke();
-    ectx.lineWidth = 5; ectx.strokeStyle = '#ffd400';
+    ectx.lineWidth = view.z > 2 ? 3 : 5; ectx.strokeStyle = '#ffd400';
     ectx.beginPath(); sides[topSide].forEach((p, i) => i ? ectx.lineTo(...p) : ectx.moveTo(...p)); ectx.stroke();
   };
   if (meth.startsWith('grid')) {
     const g = f.grid;
-    if ($('showPts').checked && !drag) {
+    if ($('showPts').checked && !(drag && drag.kind !== 'pan' && drag.kind !== 'pinch')) {
       ectx.fillStyle = 'rgba(0,229,255,.9)';
-      for (const m of g.matches) { const p = fromAna(g, m.x, m.y); ectx.fillRect(p[0] * s - 1.5, p[1] * s - 1.5, 3, 3); }
+      const d = view.z > 3 ? 2.5 : 1.5;
+      for (const m of g.matches) {
+        const p = toCss(fromAna(g, m.x, m.y));
+        if (p[0] > -5 && p[1] > -5 && p[0] < cw + 5 && p[1] < ch + 5) ectx.fillRect(p[0] - d, p[1] - d, 2 * d, 2 * d);
+      }
     }
     const sides = cropSides(f);
     strokeSides(sides);
-    // side handles (midpoints) and corner handles
+    // side handles (midpoints of the visible part of each side) and corner handles
     const active = drag && drag.kind === 'crop' ? drag.sides : [];
     const names = ['v0', 'u1', 'v1', 'u0'];
+    const inView = p => p[0] >= 0 && p[1] >= 0 && p[0] <= cw && p[1] <= ch;
     sides.forEach((pl, i) => {
-      const p = pl[pl.length >> 1], on = active.length === 1 && active[0] === names[i];
+      const vis = pl.filter(inView), p = vis.length ? vis[vis.length >> 1] : pl[pl.length >> 1];
+      const on = active.length === 1 && active[0] === names[i];
       ectx.fillStyle = on ? '#ffd400' : '#fff'; ectx.strokeStyle = '#ff2d95'; ectx.lineWidth = 2;
       ectx.beginPath(); ectx.rect(p[0] - HS, p[1] - HS, 2 * HS, 2 * HS); ectx.fill(); ectx.stroke();
       const c = pl[0], onC = active.length === 2 && active.includes(names[i]) && active.includes(names[(i + 3) % 4]);
@@ -554,13 +611,17 @@ function drawEditor() {
       ectx.beginPath(); ectx.arc(c[0], c[1], HS - 2, 0, Math.PI * 2); ectx.fill(); ectx.stroke();
     });
   } else {
-    const q = f.quad.map(p => [p[0] * s, p[1] * s]);
+    const q = f.quad.map(toCss);
     strokeSides([[q[0], q[1]], [q[1], q[2]], [q[2], q[3]], [q[3], q[0]]]);
     const labels = ['TL', 'TR', 'BR', 'BL'];
     q.forEach((p, i) => {
       ectx.beginPath(); ectx.arc(p[0], p[1], HS, 0, Math.PI * 2);
       ectx.fillStyle = drag && drag.i === i ? '#ffd400' : 'rgba(255,255,255,.9)'; ectx.fill();
       ectx.lineWidth = 2; ectx.strokeStyle = '#ff2d95'; ectx.stroke();
+      if (view.z > 2) {                      // crosshair: the exact corner point
+        ectx.beginPath(); ectx.moveTo(p[0] - HS - 6, p[1]); ectx.lineTo(p[0] + HS + 6, p[1]);
+        ectx.moveTo(p[0], p[1] - HS - 6); ectx.lineTo(p[0], p[1] + HS + 6); ectx.lineWidth = 1; ectx.stroke();
+      }
       ectx.fillStyle = '#ff2d95'; ectx.font = 'bold 11px system-ui';
       ectx.fillText(labels[i], p[0] + 12, p[1] - 10);
     });
@@ -591,10 +652,8 @@ function updateDetInfo(f) {
   if (warn) setStatus(warn.trim(), true);
 }
 
-function evtToImg(e) {
-  const r = editor.getBoundingClientRect();
-  return [(e.clientX - r.left) / view.s, (e.clientY - r.top) / view.s];
-}
+const evtCss = e => { const r = editor.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+const evtToImg = e => fromCss(evtCss(e));
 function evtToUV(f, e) {
   const p = evtToImg(e), g = f.grid;
   return g.model.inverse(...toAna(g, p[0], p[1]));
@@ -615,7 +674,7 @@ function hitTest(f, cx, cy) {
   const r = editor.getBoundingClientRect(), pc = [cx - r.left, cy - r.top];
   if (method(f) === 'corners') {
     let bi = -1, bd = HIT;
-    f.quad.forEach((q, i) => { const d = dist(pc, [q[0] * view.s, q[1] * view.s]); if (d < bd) { bd = d; bi = i; } });
+    f.quad.forEach((q, i) => { const d = dist(pc, toCss(q)); if (d < bd) { bd = d; bi = i; } });
     return bi < 0 ? null : { kind: 'corner', i: bi };
   }
   const sides = cropSides(f), names = ['v0', 'u1', 'v1', 'u0'];
@@ -628,31 +687,73 @@ function hitTest(f, cx, cy) {
   }
   return pick ? { kind: 'crop', sides: pick } : null;
 }
-// Touch: only a press on a handle/outline grabs the gesture; anywhere else the page scrolls normally.
+
+// Touch: a press on a handle/outline, any press while zoomed in (pan) and any two-finger press
+// (pinch zoom) are handled here; at fit zoom a one-finger swipe elsewhere scrolls the page.
 editor.addEventListener('touchstart', e => {
   const t = e.touches[0];
-  if (e.touches.length === 1 && hitTest(cur(), t.clientX, t.clientY)) e.preventDefault();
+  if (e.touches.length > 1 || view.z > 1.001 || hitTest(cur(), t.clientX, t.clientY)) e.preventDefault();
 }, { passive: false });
 editor.addEventListener('touchmove', e => { if (drag) e.preventDefault(); }, { passive: false });
+
+const pointers = new Map();              // active pointers on the editor: id → css point
+let pinch = null, lastTap = { t: 0, x: 0, y: 0 };
+function startPinch() {
+  const [a, b] = [...pointers.values()];
+  pinch = { d: Math.hypot(a[0] - b[0], a[1] - b[1]) || 1, z: view.z, img: fromCss([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]) };
+}
+
 editor.addEventListener('pointerdown', e => {
-  const f = cur(), hit = hitTest(f, e.clientX, e.clientY);
-  if (!hit) return;
+  const f = cur(); if (!f) return;
+  const pc = evtCss(e);
+  pointers.set(e.pointerId, pc);
+  try { editor.setPointerCapture(e.pointerId); } catch (err) { /* pointer already gone: nothing to capture */ }
+  if (pointers.size === 2) {                          // second finger: pinch (ends any handle drag)
+    if (drag && drag.kind !== 'pan') endDrag(true);
+    drag = { kind: 'pinch' }; startPinch(); e.preventDefault(); return;
+  }
+  if (pointers.size > 2) return;
+  // double tap / double click on the photo: zoom in there, or back to fit
+  const now = performance.now(), dbl = now - lastTap.t < 320 && Math.hypot(pc[0] - lastTap.x, pc[1] - lastTap.y) < 30;
+  lastTap = { t: now, x: pc[0], y: pc[1] };
+  const hit = hitTest(f, e.clientX, e.clientY);
+  if (!hit) {
+    if (dbl) { zoomAt(view.z > 1.5 ? 1 : 4, pc); lastTap.t = 0; e.preventDefault(); return; }
+    if (view.z > 1.001) { drag = { kind: 'pan', start: pc, tx: view.tx, ty: view.ty }; editor.style.cursor = 'grabbing'; e.preventDefault(); }
+    return;
+  }
   if (hit.kind === 'corner') {
     const p = evtToImg(e);
     dragOffset = [f.quad[hit.i][0] - p[0], f.quad[hit.i][1] - p[1]];
   } else if (!f.crop) f.crop = { ...uvRect(f) };
   drag = hit;
-  editor.setPointerCapture(e.pointerId);
   e.preventDefault();
   drawLoupe(e); drawEditor();
 });
+
 editor.addEventListener('pointermove', e => {
-  const f = cur();
+  const f = cur(); if (!f) return;
+  if (pointers.has(e.pointerId)) pointers.set(e.pointerId, evtCss(e));
   if (!drag) {                                   // hover cursor feedback
-    if (!f || !f.analysed || method(f) === 'corners') return;
-    const r = editor.getBoundingClientRect(), pc = [e.clientX - r.left, e.clientY - r.top];
-    const near = cropSides(f).some(pl => distToPolyline(pc, pl) < HIT);
-    editor.style.cursor = near ? 'grab' : 'crosshair';
+    if (!f.analysed) return;
+    const pc = evtCss(e);
+    const near = method(f) === 'corners' ? !!hitTest(f, e.clientX, e.clientY) : cropSides(f).some(pl => distToPolyline(pc, pl) < HIT);
+    editor.style.cursor = near ? 'grab' : view.z > 1.001 ? 'move' : 'crosshair';
+    return;
+  }
+  if (drag.kind === 'pinch') {
+    if (pointers.size < 2 || !pinch) return;
+    const [a, b] = [...pointers.values()], c = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+    view.z = Math.max(1, Math.min(ZMAX, pinch.z * Math.hypot(a[0] - b[0], a[1] - b[1]) / pinch.d));
+    // keep the photo point that was under the fingers' midpoint under it (zoom + two-finger pan)
+    view.tx = c[0] - pinch.img[0] * view.s * view.z; view.ty = c[1] - pinch.img[1] * view.s * view.z;
+    clampView(); updateZoomUI(); drawEditor();
+    return;
+  }
+  if (drag.kind === 'pan') {
+    const pc = evtCss(e);
+    view.tx = drag.tx + pc[0] - drag.start[0]; view.ty = drag.ty + pc[1] - drag.start[1];
+    clampView(); drawEditor();
     return;
   }
   if (drag.kind === 'corner') {
@@ -669,19 +770,63 @@ editor.addEventListener('pointermove', e => {
       else if (sd === 'v0') c.v0 = Math.min(val, c.v1 - 1); else c.v1 = Math.max(val, c.v0 + 1);
     }
   }
+  autoPan(e);
   drawEditor(); drawLoupe(e);
   renderSoon(true);
 });
-const endDrag = () => {
-  if (!drag) return;
-  drag = null; $('loupe').style.display = 'none'; $('mini').style.display = 'none';
-  drawEditor(); renderSoon();
+
+// dragging a handle near the edge of a zoomed-in view scrolls the view along
+function autoPan(e) {
+  if (view.z <= 1.001) return;
+  const pc = evtCss(e), m = 24, step = 8;
+  const dx = pc[0] < m ? step : pc[0] > view.cw - m ? -step : 0, dy = pc[1] < m ? step : pc[1] > view.ch - m ? -step : 0;
+  if (dx || dy) { view.tx += dx; view.ty += dy; clampView(); }
+}
+
+function endDrag(keepPointers) {
+  const was = drag;
+  if (!was) return;
+  drag = null; pinch = null; $('loupe').style.display = 'none'; $('mini').style.display = 'none';
+  editor.style.cursor = '';
+  drawEditor();
+  if (was.kind === 'corner' || was.kind === 'crop') renderSoon();
+}
+const pointerUp = e => {
+  pointers.delete(e.pointerId);
+  if (drag && drag.kind === 'pinch') {
+    if (pointers.size === 1) {                       // one finger left: continue as a pan
+      const [p] = [...pointers.values()];
+      drag = { kind: 'pan', start: p, tx: view.tx, ty: view.ty }; pinch = null;
+    } else if (!pointers.size) endDrag();
+    return;
+  }
+  if (!pointers.size) endDrag();
 };
-editor.addEventListener('pointerup', endDrag);
-editor.addEventListener('pointercancel', endDrag);
+editor.addEventListener('pointerup', pointerUp);
+editor.addEventListener('pointercancel', pointerUp);
+
+// mouse wheel / trackpad: pinch (ctrl+wheel) or ⌘/ctrl + wheel zooms; when zoomed in, plain wheel pans
+editor.addEventListener('wheel', e => {
+  const f = cur(); if (!f) return;
+  if (e.ctrlKey || e.metaKey) {
+    e.preventDefault();
+    zoomAt(view.z * Math.exp(-e.deltaY * (e.deltaMode ? 0.05 : 0.0025)), evtCss(e));
+  } else if (view.z > 1.001) {
+    e.preventDefault();
+    view.tx -= e.deltaX; view.ty -= e.deltaY; clampView(); drawEditor();
+  }
+}, { passive: false });
+
+const zoomCentre = () => [view.cw / 2, view.ch / 2];
+$('zoomInBtn').onclick = () => zoomAt(view.z * 2, zoomCentre());
+$('zoomOutBtn').onclick = () => zoomAt(view.z / 2, zoomCentre());
+$('zoomFitBtn').onclick = () => zoomAt(1, zoomCentre());
 
 function drawLoupe(e) {
-  const L = $('loupe'), lc = L.getContext('2d'), f = cur(), pt = evtToImg(e);
+  const L = $('loupe'), f = cur();
+  // the editor itself is magnified enough: no separate magnifier
+  if (view.s * view.z * (window.devicePixelRatio || 1) >= 2) { L.style.display = 'none'; return; }
+  const lc = L.getContext('2d'), pt = evtToImg(e);
   if (drag && drag.kind === 'corner') { pt[0] = f.quad[drag.i][0]; pt[1] = f.quad[drag.i][1]; }
   const Z = 6, R = 90;
   L.style.display = 'block';
