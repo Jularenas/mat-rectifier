@@ -110,8 +110,8 @@
   <section>
     <h2>2 · Rectified result</h2>
     <div class="row">
-      <button id="warpBtn" class="primary" disabled>Rectify</button>
-      <button id="downloadBtn" disabled>Download</button>
+      <button id="resetCropBtn" disabled title="Undo your edge adjustments">Reset edges</button>
+      <button id="downloadBtn" class="primary" disabled>Download</button>
       <label>Zoom <select id="zoom">
         <option value="fit">Fit</option><option value="0.25">25%</option><option value="0.5">50%</option>
         <option value="1">100%</option><option value="2">200%</option></select></label>
@@ -147,7 +147,7 @@ function syncSettingsUI() {
   for (const k of SETTING_KEYS) $(k).value = settings[k];
   $('dpiInfo').textContent = `= ${+(settings.pxcm * 2.54).toFixed(3)} DPI`;
   $('hint').textContent = settings.mode === 'grid'
-    ? 'The page measures the printed 1 cm grid itself (cyan dots), so the mat does not need to be fully in the photo and slight lens bending is corrected.'
+    ? 'The page measures the printed 1 cm grid itself (cyan dots), so the mat does not need to be fully in the photo and lens bending is corrected. Drag a side or corner of the pink outline to adjust the crop.'
     : 'Drag the 4 points onto the outer corners of the mat. A magnifier appears while dragging. Shoot from straight above for best results.';
 }
 for (const k of SETTING_KEYS) {
@@ -210,10 +210,15 @@ function select(i) {
   $('fileLabel').textContent = `${idx + 1}/${files.length} · ${f.name}`;
   $('editorWrap').hidden = false;
   drop.style.padding = '10px';
-  if (cvReady && !f.analysed) analyse(f);
   drawEditor();
-  if (cvReady) render(); else clearResult();
   updateButtons();
+  if (!cvReady) { clearResult(); return; }
+  if (f.analysed) { render(); return; }
+  setStatus('Detecting the grid…');
+  setTimeout(() => {                    // let the photo and status paint before the heavy work
+    if (cur() !== f) return;
+    analyse(f); drawEditor(); render(); updateButtons();
+  }, 30);
 }
 $('prevBtn').onclick = () => idx > 0 && select(idx - 1);
 $('nextBtn').onclick = () => idx < files.length - 1 && select(idx + 1);
@@ -222,7 +227,7 @@ function updateButtons() {
   const has = !!cur();
   $('prevBtn').disabled = idx <= 0;
   $('nextBtn').disabled = idx >= files.length - 1;
-  for (const b of ['detectBtn', 'rotateBtn', 'warpBtn']) $(b).disabled = !(has && cvReady);
+  for (const b of ['detectBtn', 'rotateBtn', 'resetCropBtn']) $(b).disabled = !(has && cvReady);
   $('downloadBtn').disabled = !(has && cur().out);
 }
 
@@ -380,24 +385,40 @@ function detectCorners(f) {
 }
 
 function analyse(f) {
-  f.analysed = true; f.grid = null; f.quad = null; f.note = '';
+  f.analysed = true; f.grid = null; f.quad = null; f.note = ''; f.crop = null;
   if (settings.mode === 'grid') {
     try { f.grid = Grid.detect(f.bitmap, greenMask); }
     catch (e) { console.error(e); f.grid = { ok: false, reason: 'error: ' + e.message }; }
     if (!f.grid.ok) f.note = `Printed grid not found (${f.grid.reason}). Using the 4-corner method instead.`;
   }
-  if (settings.mode === 'corners' || settings.crop === 'edge' || !f.grid.ok) detectCorners(f);
-  if (settings.mode === 'grid' && f.grid.ok && settings.crop === 'edge' && !(f.quadAuto && f.quadInside))
-    f.note = 'The whole mat is not visible in this photo, so it is cropped to the visible grid instead.';
+  if (settings.mode === 'corners' || !f.grid.ok) detectCorners(f);
+  if (settings.mode === 'grid' && f.grid.ok && settings.crop === 'edge' && !edgeRect(f))
+    f.note = 'The mat edges are not visible in this photo, so it is cropped to the visible grid instead.';
 }
 
 function method(f) {
-  if (settings.mode === 'grid' && f.grid && f.grid.ok)
-    return settings.crop === 'edge' && f.quad && (f.quadInside || !f.quadAuto) && !(f.note || '').startsWith('The whole') ? 'grid-edge' : 'grid';
+  if (settings.mode === 'grid' && f.grid && f.grid.ok) return settings.crop === 'edge' && edgeRect(f) ? 'grid-edge' : 'grid';
   return 'corners';
 }
 
-$('detectBtn').onclick = () => { const f = cur(); analyse(f); drawEditor(); render(); };
+// Outer-edge crop in grid cm coordinates. Each axis needs at least one visible mat edge; a hidden
+// edge is placed from the opposite one using the nominal mat size (long side on the longer axis).
+function edgeRect(f) {
+  const e = f.grid && f.grid.edges; if (!e) return null;
+  const v = f.grid.visible, longU = (v.u1 - v.u0) > (v.v1 - v.v0);
+  const sizeU = longU ? settings.matLong : settings.matShort, sizeV = longU ? settings.matShort : settings.matLong;
+  const axis = (a, b, size) => {
+    if (a !== null && b !== null) return Math.abs(b - a - size) < 0.1 * size ? [a, b, 2] : null;  // both seen, sane size
+    if (a !== null) return [a, a + size, 1];
+    if (b !== null) return [b - size, b, 1];
+    return null;
+  };
+  const U = axis(e.u0, e.u1, sizeU), V = axis(e.v0, e.v1, sizeV);
+  if (!U || !V) return null;
+  return { u0: U[0], u1: U[1], v0: V[0], v1: V[1], seen: U[2] + V[2] };
+}
+
+$('detectBtn').onclick = () => { const f = cur(); setStatus('Detecting…'); setTimeout(() => { analyse(f); drawEditor(); render(); }, 20); };
 $('rotateBtn').onclick = () => { const f = cur(); f.rot = (f.rot + 1) % 4; drawEditor(); render(); };
 
 // conversions between full-res pixel-edge coords (editor / quad) and grid analysis coords
@@ -406,20 +427,27 @@ const fromAna = (g, x, y) => [(x + 0.5) / g.sc, (y + 0.5) / g.sc];
 
 // output rectangle in grid cm coordinates for the current method
 function uvRect(f) {
-  const g = f.grid;
-  if (method(f) === 'grid-edge') {
-    const uv = f.quad.map(p => g.model.inverse(...toAna(g, p[0], p[1])));
-    const us = uv.map(p => p[0]).sort((a, b) => a - b), vs = uv.map(p => p[1]).sort((a, b) => a - b);
-    return { u0: (us[0] + us[1]) / 2, u1: (us[2] + us[3]) / 2, v0: (vs[0] + vs[1]) / 2, v1: (vs[2] + vs[3]) / 2 };
-  }
-  return g.visible;
+  if (f.crop) return f.crop;                       // adjusted by dragging the outline
+  if (method(f) === 'grid-edge') return edgeRect(f);
+  return f.grid.visible;
 }
 
 // ---------- editor ----------
 const editor = $('editor'), ectx = editor.getContext('2d');
 let view = { s: 1 };           // full-res px -> css px
 let maskCache = null;
-let dragging = -1;
+// drag state: { kind: 'corner', i } (manual corners) or { kind: 'crop', sides: ['u0'|'u1'|'v0'|'v1', ...] }
+let drag = null;
+
+// crop rectangle sides as polylines in editor css px (grid methods)
+function cropSides(f) {
+  const g = f.grid, M = g.model, r = uvRect(f), N = 40, s = view.s;
+  const edge = (ua, va, ub, vb) => Array.from({ length: N + 1 }, (_, k) => {
+    const t = k / N, a = M.forward(ua + (ub - ua) * t, va + (vb - va) * t), p = fromAna(g, a[0], a[1]);
+    return [p[0] * s, p[1] * s];
+  });
+  return [edge(r.u0, r.v0, r.u1, r.v0), edge(r.u1, r.v0, r.u1, r.v1), edge(r.u1, r.v1, r.u0, r.v1), edge(r.u0, r.v1, r.u0, r.v0)];
+}
 
 function drawEditor() {
   const f = cur(); if (!f) return;
@@ -428,8 +456,10 @@ function drawEditor() {
   const s = Math.min(cssW / f.bitmap.width, (window.innerHeight * 0.75) / f.bitmap.height);
   view.s = s;
   const cw = Math.round(f.bitmap.width * s), ch = Math.round(f.bitmap.height * s);
-  editor.style.width = cw + 'px'; editor.style.height = ch + 'px';
-  editor.width = Math.round(cw * dpr); editor.height = Math.round(ch * dpr);
+  if (editor.width !== Math.round(cw * dpr) || editor.height !== Math.round(ch * dpr)) {
+    editor.style.width = cw + 'px'; editor.style.height = ch + 'px';
+    editor.width = Math.round(cw * dpr); editor.height = Math.round(ch * dpr);
+  }
   ectx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ectx.drawImage(f.bitmap, 0, 0, cw, ch);
   if ($('showMask').checked && cvReady) {
@@ -452,45 +482,52 @@ function drawEditor() {
     ectx.beginPath(); sides[topSide].forEach((p, i) => i ? ectx.lineTo(...p) : ectx.moveTo(...p)); ectx.stroke();
   };
   if (meth.startsWith('grid')) {
-    const g = f.grid, M = g.model;
-    if ($('showPts').checked) {
+    const g = f.grid;
+    if ($('showPts').checked && !drag) {
       ectx.fillStyle = 'rgba(0,229,255,.9)';
       for (const m of g.matches) { const p = fromAna(g, m.x, m.y); ectx.fillRect(p[0] * s - 1.5, p[1] * s - 1.5, 3, 3); }
     }
-    const r = uvRect(f), N = 40;
-    const edge = (ua, va, ub, vb) => Array.from({ length: N + 1 }, (_, k) => {
-      const t = k / N, a = M.forward(ua + (ub - ua) * t, va + (vb - va) * t), p = fromAna(g, a[0], a[1]);
-      return [p[0] * s, p[1] * s];
+    const sides = cropSides(f);
+    strokeSides(sides);
+    // side handles (midpoints) and corner handles
+    const active = drag && drag.kind === 'crop' ? drag.sides : [];
+    const names = ['v0', 'u1', 'v1', 'u0'];
+    sides.forEach((pl, i) => {
+      const p = pl[pl.length >> 1], on = active.length === 1 && active[0] === names[i];
+      ectx.fillStyle = on ? '#ffd400' : '#fff'; ectx.strokeStyle = '#ff2d95'; ectx.lineWidth = 2;
+      ectx.beginPath(); ectx.roundRect(p[0] - 9, p[1] - 9, 18, 18, 4); ectx.fill(); ectx.stroke();
+      const c = pl[0], onC = active.length === 2 && active.includes(names[i]) && active.includes(names[(i + 3) % 4]);
+      ectx.fillStyle = onC ? '#ffd400' : '#fff';
+      ectx.beginPath(); ectx.arc(c[0], c[1], 7, 0, Math.PI * 2); ectx.fill(); ectx.stroke();
     });
-    strokeSides([edge(r.u0, r.v0, r.u1, r.v0), edge(r.u1, r.v0, r.u1, r.v1), edge(r.u1, r.v1, r.u0, r.v1), edge(r.u0, r.v1, r.u0, r.v0)]);
   } else {
     const q = f.quad.map(p => [p[0] * s, p[1] * s]);
     strokeSides([[q[0], q[1]], [q[1], q[2]], [q[2], q[3]], [q[3], q[0]]]);
-  }
-  if (meth !== 'grid') {
     const labels = ['TL', 'TR', 'BR', 'BL'];
-    f.quad.forEach((p0, i) => {
-      const p = [p0[0] * s, p0[1] * s];
+    q.forEach((p, i) => {
       ectx.beginPath(); ectx.arc(p[0], p[1], 9, 0, Math.PI * 2);
-      ectx.fillStyle = i === dragging ? '#ffd400' : 'rgba(255,255,255,.9)'; ectx.fill();
+      ectx.fillStyle = drag && drag.i === i ? '#ffd400' : 'rgba(255,255,255,.9)'; ectx.fill();
       ectx.lineWidth = 2; ectx.strokeStyle = '#ff2d95'; ectx.stroke();
       ectx.fillStyle = '#ff2d95'; ectx.font = 'bold 11px system-ui';
       ectx.fillText(labels[i], p[0] + 12, p[1] - 10);
     });
   }
-  updateDetInfo(f);
+  if (!drag) updateDetInfo(f);
 }
 ['showMask', 'showPts'].forEach(id => ($(id).onchange = drawEditor));
-window.addEventListener('resize', () => drawEditor());
+window.addEventListener('resize', () => { drawEditor(); applyZoom(); renderSoon(); });
 
 function updateDetInfo(f) {
   const meth = method(f), g = f.grid, lines = [];
   if (meth.startsWith('grid')) {
-    const v = g.visible;
     lines.push(`Grid: ${g.matches.length} crossings · fit error ${g.rmsMm.toFixed(2)} mm RMS (95% < ${g.p95Mm.toFixed(2)} mm)` +
-               ` · ${g.spacingPx.toFixed(1)} photo px per cm · lens correction ${g.lam ? g.lam.toFixed(3) : 'none'}` + (g.mesh ? ' · local mesh on' : ''));
-    if (meth === 'grid-edge') { const r = uvRect(f); lines.push(`Mat outer edge measured: ${(r.u1 - r.u0).toFixed(1)} × ${(r.v1 - r.v0).toFixed(1)} cm`); }
-    else lines.push(`Visible mat: ${v.u1 - v.u0} × ${v.v1 - v.v0} cm`);
+               ` · ${g.spacingPx.toFixed(1)} photo px per cm · lens correction ${g.lam ? g.lam.toFixed(3) : 'none'}` + (g.mesh ? ` · local correction every ${g.mesh} cm` : ''));
+    const r = uvRect(f);
+    if (f.crop) lines.push(`Crop adjusted: ${+(r.u1 - r.u0).toFixed(1)} × ${+(r.v1 - r.v0).toFixed(1)} cm`);
+    else if (meth === 'grid-edge')
+      lines.push(r.seen === 4 ? `Mat outer edge measured: ${(r.u1 - r.u0).toFixed(1)} × ${(r.v1 - r.v0).toFixed(1)} cm`
+                              : `Mat outer edge: ${4 - r.seen} edge(s) hidden, placed from the nominal ${settings.matShort} × ${settings.matLong} cm size`);
+    else lines.push(`Visible mat: ${r.u1 - r.u0} × ${r.v1 - r.v0} cm`);
   } else lines.push(f.quadAuto ? 'Corners detected automatically. Check them and drag to adjust.' : 'Drag the 4 points to the mat corners.');
   $('detInfo').innerHTML = lines.map(l => `<div>${l}</div>`).join('');
   let warn = f.note || '';
@@ -505,30 +542,84 @@ function evtToImg(e) {
   const r = editor.getBoundingClientRect();
   return [(e.clientX - r.left) / view.s, (e.clientY - r.top) / view.s];
 }
+function evtToUV(f, e) {
+  const p = evtToImg(e), g = f.grid;
+  return g.model.inverse(...toAna(g, p[0], p[1]));
+}
+const distToPolyline = (p, pl) => {
+  let best = Infinity;
+  for (let i = 1; i < pl.length; i++) {
+    const a = pl[i - 1], b = pl[i], dx = b[0] - a[0], dy = b[1] - a[1], L = dx * dx + dy * dy;
+    const t = L ? Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L)) : 0;
+    best = Math.min(best, Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy));
+  }
+  return best;
+};
 let dragOffset = [0, 0];
 editor.addEventListener('pointerdown', e => {
-  const f = cur(); if (!f || !f.quad || method(f) === 'grid') return;
-  const p = evtToImg(e);
-  let bi = -1, bd = 28 / view.s;
-  f.quad.forEach((q, i) => { const d = dist(p, q); if (d < bd) { bd = d; bi = i; } });
-  if (bi < 0) return;
-  dragging = bi; editor.setPointerCapture(e.pointerId);
-  dragOffset = [f.quad[bi][0] - p[0], f.quad[bi][1] - p[1]];
+  const f = cur(); if (!f || !f.analysed) return;
+  const meth = method(f), r = editor.getBoundingClientRect(), pc = [e.clientX - r.left, e.clientY - r.top];
+  if (meth === 'corners') {
+    const p = evtToImg(e);
+    let bi = -1, bd = 28 / view.s;
+    f.quad.forEach((q, i) => { const d = dist(p, q); if (d < bd) { bd = d; bi = i; } });
+    if (bi < 0) return;
+    drag = { kind: 'corner', i: bi };
+    dragOffset = [f.quad[bi][0] - p[0], f.quad[bi][1] - p[1]];
+  } else {
+    const sides = cropSides(f), names = ['v0', 'u1', 'v1', 'u0'];
+    // corners first (drag two sides), then the nearest side
+    let pick = null;
+    sides.forEach((pl, i) => { if (!pick && dist(pc, pl[0]) < 16) pick = [names[i], names[(i + 3) % 4]]; });
+    if (!pick) {
+      let bd = 14;
+      sides.forEach((pl, i) => { const d = distToPolyline(pc, pl); if (d < bd) { bd = d; pick = [names[i]]; } });
+    }
+    if (!pick) return;
+    if (!f.crop) f.crop = { ...uvRect(f) };
+    drag = { kind: 'crop', sides: pick };
+  }
+  editor.setPointerCapture(e.pointerId);
+  e.preventDefault();
   drawLoupe(e); drawEditor();
 });
 editor.addEventListener('pointermove', e => {
-  if (dragging < 0) return;
-  const p = evtToImg(e), f = cur();
-  f.quad[dragging] = [p[0] + dragOffset[0], p[1] + dragOffset[1]];
-  f.quadAuto = false;
+  const f = cur();
+  if (!drag) {                                   // hover cursor feedback
+    if (!f || !f.analysed || method(f) === 'corners') return;
+    const r = editor.getBoundingClientRect(), pc = [e.clientX - r.left, e.clientY - r.top];
+    const near = cropSides(f).some(pl => distToPolyline(pc, pl) < 14);
+    editor.style.cursor = near ? 'grab' : 'crosshair';
+    return;
+  }
+  if (drag.kind === 'corner') {
+    const p = evtToImg(e);
+    f.quad[drag.i] = [p[0] + dragOffset[0], p[1] + dragOffset[1]];
+    f.quadAuto = false;
+  } else {
+    const uv = evtToUV(f, e), c = f.crop;
+    // "on grid lines" crop snaps to whole cm so the Procreate grid stays aligned
+    const snap = x => settings.crop === 'grid' ? Math.round(x) : Math.round(x * 10) / 10;
+    for (const sd of drag.sides) {
+      const val = snap(sd[0] === 'u' ? uv[0] : uv[1]);
+      if (sd === 'u0') c.u0 = Math.min(val, c.u1 - 1); else if (sd === 'u1') c.u1 = Math.max(val, c.u0 + 1);
+      else if (sd === 'v0') c.v0 = Math.min(val, c.v1 - 1); else c.v1 = Math.max(val, c.v0 + 1);
+    }
+  }
   drawEditor(); drawLoupe(e);
+  renderSoon(true);
 });
-const endDrag = () => { if (dragging < 0) return; dragging = -1; $('loupe').style.display = 'none'; drawEditor(); render(); };
+const endDrag = () => {
+  if (!drag) return;
+  drag = null; $('loupe').style.display = 'none';
+  drawEditor(); renderSoon();
+};
 editor.addEventListener('pointerup', endDrag);
 editor.addEventListener('pointercancel', endDrag);
 
 function drawLoupe(e) {
-  const L = $('loupe'), lc = L.getContext('2d'), f = cur(), pt = f.quad[dragging];
+  const L = $('loupe'), lc = L.getContext('2d'), f = cur(), pt = evtToImg(e);
+  if (drag && drag.kind === 'corner') { pt[0] = f.quad[drag.i][0]; pt[1] = f.quad[drag.i][1]; }
   const Z = 6, R = 90;
   L.style.display = 'block';
   L.style.left = Math.min(window.innerWidth - 190, e.clientX + 30) + 'px';
@@ -539,94 +630,128 @@ function drawLoupe(e) {
   lc.strokeStyle = '#ff2d95'; lc.lineWidth = 1;
   lc.beginPath(); lc.moveTo(90, 0); lc.lineTo(90, 180); lc.moveTo(0, 90); lc.lineTo(180, 90); lc.stroke();
 }
+$('resetCropBtn').onclick = () => { const f = cur(); if (!f) return; f.crop = null; if (method(f) === 'corners') detectCorners(f); drawEditor(); renderSoon(); };
 
 // ---------- rectify ----------
 const outCanvas = $('outCanvas'), gridCanvas = $('gridCanvas');
 
-function fullResMat(f) {
-  const full = document.createElement('canvas');
-  full.width = f.bitmap.width; full.height = f.bitmap.height;
-  full.getContext('2d').drawImage(f.bitmap, 0, 0);
-  return cv.imread(full);
+// source photo as an OpenCV Mat, cached per file and resolution level (smaller levels make
+// low-resolution previews fast and free of aliasing)
+const srcCache = { f: null, levels: new Map() };
+function srcMat(f, level) {
+  if (srcCache.f !== f) { srcCache.levels.forEach(m => m.delete()); srcCache.levels.clear(); srcCache.f = f; }
+  if (!srcCache.levels.has(level)) {
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(f.bitmap.width * level)); c.height = Math.max(1, Math.round(f.bitmap.height * level));
+    const x = c.getContext('2d'); x.imageSmoothingQuality = 'high'; x.drawImage(f.bitmap, 0, 0, c.width, c.height);
+    srcCache.levels.set(level, cv.imread(c));
+  }
+  return srcCache.levels.get(level);
 }
 
-// grid method: every output pixel → (u,v) cm → photo pixel through the fitted model
-function renderGrid(f, r) {
-  const S = settings.pxcm, g = f.grid, M = g.model, sc = g.sc;
-  const W = Math.round((r.u1 - r.u0) * S), H = Math.round((r.v1 - r.v0) * S);
-  if (W * H > 150e6 || W < 1 || H < 1) throw new Error(`output would be ${W}×${H} px`);
-  const src = fullResMat(f);
+// logical output (full resolution, before rotation) for the current method
+function outputGeom(f) {
+  const S = settings.pxcm;
+  if (method(f) === 'corners') {
+    const q = f.quad;
+    const horiz = (dist(q[0], q[1]) + dist(q[3], q[2])) / 2, vert = (dist(q[0], q[3]) + dist(q[1], q[2])) / 2;
+    const [wcm, hcm] = horiz < vert ? [settings.matShort, settings.matLong] : [settings.matLong, settings.matShort];
+    return { wcm, hcm, W: Math.round(wcm * S), H: Math.round(hcm * S), offX: null, offY: null };
+  }
+  const r = uvRect(f);
+  return { r, wcm: r.u1 - r.u0, hcm: r.v1 - r.v0, W: Math.round((r.u1 - r.u0) * S), H: Math.round((r.v1 - r.v0) * S),
+           offX: Math.ceil(r.u0) - r.u0, offY: Math.ceil(r.v0) - r.v0 };
+}
+
+// render at `k` × full resolution (k ≤ 1) into a new canvas (before rotation)
+function renderBase(f, k, fast) {
+  const geo = outputGeom(f), S = settings.pxcm * k;
+  const W = Math.max(1, Math.round(geo.W * k)), H = Math.max(1, Math.round(geo.H * k));
+  if (W * H > 150e6) throw new Error(`output would be ${W}×${H} px`);
+  // smallest source level that still keeps ≥ 1.5 photo px per output px (no aliasing, less work)
+  const photoPxPerCm = method(f) === 'corners'
+    ? (dist(f.quad[0], f.quad[1]) + dist(f.quad[3], f.quad[2])) / 2 / geo.wcm : f.grid.spacingPx;
+  const lv = [1, 0.5, 0.25].reduce((best, l) => (photoPxPerCm * l >= 1.5 * S ? l : best), 1);
+  const src = srcMat(f, lv);
+  const interp = fast ? cv.INTER_LINEAR : cv.INTER_CUBIC;
   const base = document.createElement('canvas'); base.width = W; base.height = H;
   const bctx = base.getContext('2d');
-  const STRIP = 256;
-  for (let y0 = 0; y0 < H; y0 += STRIP) {
-    const rows = Math.min(STRIP, H - y0);
-    const mx = new cv.Mat(rows, W, cv.CV_32FC1), my = new cv.Mat(rows, W, cv.CV_32FC1);
-    Grid.fillMaps(M, r, S, y0, rows, W, mx.data32F, my.data32F, sc);
-    const dst = new cv.Mat();
-    cv.remap(src, dst, mx, my, cv.INTER_CUBIC, cv.BORDER_CONSTANT, new cv.Scalar(0, 0, 0, 0));
-    bctx.putImageData(new ImageData(new Uint8ClampedArray(dst.data), W, rows), 0, y0);
-    [mx, my, dst].forEach(m => m.delete());
-  }
-  src.delete();
-  return { base, wcm: r.u1 - r.u0, hcm: r.v1 - r.v0, offX: Math.ceil(r.u0) - r.u0, offY: Math.ceil(r.v0) - r.v0 };
-}
-
-// manual method: plain 4-corner perspective warp to the mat size
-function renderCorners(f) {
-  const q = f.quad, S = settings.pxcm;
-  const horiz = (dist(q[0], q[1]) + dist(q[3], q[2])) / 2, vert = (dist(q[0], q[3]) + dist(q[1], q[2])) / 2;
-  const [wcm, hcm] = horiz < vert ? [settings.matShort, settings.matLong] : [settings.matLong, settings.matShort];
-  const w = Math.round(wcm * S), h = Math.round(hcm * S);
-  const src = fullResMat(f), dst = new cv.Mat();
-  // corners of the quad are pixel *edges*; OpenCV maps pixel centres, hence the −0.5 shifts
-  const sp = cv.matFromArray(4, 1, cv.CV_32FC2, q.flatMap(p => [p[0] - 0.5, p[1] - 0.5]));
-  const dp = cv.matFromArray(4, 1, cv.CV_32FC2, [-0.5, -0.5, w - 0.5, -0.5, w - 0.5, h - 0.5, -0.5, h - 0.5]);
-  const Mx = cv.getPerspectiveTransform(sp, dp);
-  cv.warpPerspective(src, dst, Mx, new cv.Size(w, h), cv.INTER_LANCZOS4, cv.BORDER_REPLICATE, new cv.Scalar());
-  const base = document.createElement('canvas');
-  cv.imshow(base, dst);
-  [src, dst, sp, dp, Mx].forEach(m => m.delete());
-  return { base, wcm, hcm, offX: null, offY: null };
-}
-
-function render() {
-  const f = cur(); if (!f || !cvReady || !f.analysed) return;
-  setStatus('Rectifying…');
-  setTimeout(() => {            // let the status message paint first
-    const t0 = performance.now(), meth = method(f);
-    let res;
-    try { res = meth === 'corners' ? renderCorners(f) : renderGrid(f, uvRect(f)); }
-    catch (e) { console.error(e); setStatus('Could not rectify: ' + e.message, true); return; }
-    // rotate by quarter turns
-    const { base } = res, r = f.rot;
-    const w = r % 2 ? base.height : base.width, h = r % 2 ? base.width : base.height;
-    outCanvas.width = w; outCanvas.height = h;
-    const ctx = outCanvas.getContext('2d');
-    ctx.save(); ctx.translate(w / 2, h / 2); ctx.rotate(r * Math.PI / 2); ctx.drawImage(base, -base.width / 2, -base.height / 2); ctx.restore();
-    f.out = { w, h };
-    // where the first printed grid line sits (preview overlay), following the rotation
-    if (res.offX !== null) {
-      let ox = res.offX, oy = res.offY, wc = res.wcm, hc = res.hcm;
-      for (let k = 0; k < r; k++) { [ox, oy] = [(((hc - oy) % 1) + 1) % 1, ox]; [wc, hc] = [hc, wc]; }
-      $('gridOffX').value = +(ox * 10).toFixed(2); $('gridOffY').value = +(oy * 10).toFixed(2);
+  if (method(f) === 'corners') {
+    const q = f.quad, dst = new cv.Mat();
+    const sp = cv.matFromArray(4, 1, cv.CV_32FC2, q.flatMap(p => [p[0] * lv - 0.5, p[1] * lv - 0.5]));
+    const dp = cv.matFromArray(4, 1, cv.CV_32FC2, [-0.5, -0.5, W - 0.5, -0.5, W - 0.5, H - 0.5, -0.5, H - 0.5]);
+    const Mx = cv.getPerspectiveTransform(sp, dp);
+    cv.warpPerspective(src, dst, Mx, new cv.Size(W, H), fast ? cv.INTER_LINEAR : cv.INTER_LANCZOS4, cv.BORDER_REPLICATE, new cv.Scalar());
+    bctx.putImageData(new ImageData(new Uint8ClampedArray(dst.data), W, H), 0, 0);
+    [dst, sp, dp, Mx].forEach(m => m.delete());
+  } else {
+    // every output pixel → (u,v) cm → photo pixel through the fitted model
+    const g = f.grid, r = geo.r, sc = g.sc / lv;      // analysis coords → this source level
+    const STRIP = 256;
+    for (let y0 = 0; y0 < H; y0 += STRIP) {
+      const rows = Math.min(STRIP, H - y0);
+      const mx = new cv.Mat(rows, W, cv.CV_32FC1), my = new cv.Mat(rows, W, cv.CV_32FC1), dst = new cv.Mat();
+      Grid.fillMaps(g.model, r, S, y0, rows, W, mx.data32F, my.data32F, sc);
+      cv.remap(src, dst, mx, my, interp, cv.BORDER_CONSTANT, new cv.Scalar(0, 0, 0, 0));
+      bctx.putImageData(new ImageData(new Uint8ClampedArray(dst.data), W, rows), 0, y0);
+      [mx, my, dst].forEach(m => m.delete());
     }
-    const [wcm, hcm] = r % 2 ? [res.hcm, res.wcm] : [res.wcm, res.hcm];
-    applyZoom();
-    $('outInfo').textContent = `${w}×${h} px · ${+wcm.toFixed(2)}×${+hcm.toFixed(2)} cm · ${settings.pxcm} px/cm · ${+(settings.pxcm * 2.54).toFixed(3)} DPI`;
-    setStatus(`Rectified in ${Math.round(performance.now() - t0)} ms.`);
-    updateDetInfo(f);
-    updateButtons();
-  }, 20);
+  }
+  return { base, geo };
 }
-$('warpBtn').onclick = render;
+
+function rotated(base, r) {
+  const w = r % 2 ? base.height : base.width, h = r % 2 ? base.width : base.height;
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+  ctx.translate(w / 2, h / 2); ctx.rotate(r * Math.PI / 2); ctx.drawImage(base, -base.width / 2, -base.height / 2);
+  return c;
+}
+
+// Preview: rendered only at the resolution the result panel shows (fast enough to follow a drag);
+// full resolution is rendered for the download.
+function renderPreview(fast) {
+  const f = cur(); if (!f || !cvReady || !f.analysed) return;
+  const t0 = performance.now();
+  const geo = outputGeom(f), r = f.rot;
+  f.out = { w: r % 2 ? geo.H : geo.W, h: r % 2 ? geo.W : geo.H };
+  applyZoom(true);
+  const k = Math.min(1, viewScale * (fast ? 1 : (window.devicePixelRatio || 1)));
+  let res;
+  try { res = renderBase(f, k, fast); }
+  catch (e) { console.error(e); setStatus('Could not rectify: ' + e.message, true); return; }
+  const c = rotated(res.base, r);
+  outCanvas.width = c.width; outCanvas.height = c.height;
+  outCanvas.getContext('2d').drawImage(c, 0, 0);
+  // where the first printed grid line sits (preview overlay), following the rotation
+  if (geo.offX !== null) {
+    let ox = geo.offX, oy = geo.offY, wc = geo.wcm, hc = geo.hcm;
+    for (let i = 0; i < r; i++) { [ox, oy] = [(((hc - oy) % 1) + 1) % 1, ox]; [wc, hc] = [hc, wc]; }
+    $('gridOffX').value = +(ox * 10).toFixed(2); $('gridOffY').value = +(oy * 10).toFixed(2);
+  }
+  const [wcm, hcm] = r % 2 ? [geo.hcm, geo.wcm] : [geo.wcm, geo.hcm];
+  drawGrid();
+  $('outInfo').textContent = `${f.out.w}×${f.out.h} px · ${+wcm.toFixed(2)}×${+hcm.toFixed(2)} cm · ${settings.pxcm} px/cm · ${+(settings.pxcm * 2.54).toFixed(3)} DPI`;
+  if (!fast) { setStatus(`Ready (preview ${Math.round(performance.now() - t0)} ms).`); updateDetInfo(f); }
+  updateButtons();
+}
+
+// coalesce bursts of changes (pointer moves) into one preview render per event-loop turn
+let renderQueued = false, renderFast = false;
+function renderSoon(fast = false) {
+  renderFast = renderQueued ? renderFast && fast : fast;
+  if (renderQueued) return;
+  renderQueued = true;
+  setTimeout(() => { renderQueued = false; renderPreview(renderFast); }, 0);
+}
+const render = () => renderSoon(false);
 
 function clearResult() {
   outCanvas.width = outCanvas.height = 0; gridCanvas.width = gridCanvas.height = 0;
   $('outInfo').textContent = ''; updateButtons();
 }
 
-let viewScale = 1;   // output px -> css px
+let viewScale = 1;   // full-res output px -> css px
 // Grid is drawn at screen resolution so 1 cm lines don't alias when zoomed out.
 function drawGrid() {
   const f = cur(); if (!f || !f.out) return;
@@ -649,17 +774,16 @@ function drawGrid() {
 }
 ['showGrid', 'gridOffX', 'gridOffY'].forEach(id => $(id).addEventListener('input', drawGrid));
 
-function applyZoom() {
+function applyZoom(noRender) {
   const f = cur(); if (!f || !f.out) return;
   const z = $('zoom').value, stack = $('resultStack'), box = $('resultScroll');
   viewScale = z === 'fit' ? Math.min((box.clientWidth - 2) / f.out.w, (window.innerHeight * 0.78) / f.out.h) : parseFloat(z);
   stack.style.width = f.out.w * viewScale + 'px'; stack.style.height = f.out.h * viewScale + 'px';
   outCanvas.style.width = '100%'; outCanvas.style.height = '100%';
   outCanvas.style.imageRendering = viewScale >= 1 ? 'pixelated' : 'auto';
-  drawGrid();
+  if (!noRender) { drawGrid(); renderSoon(); }
 }
-$('zoom').onchange = applyZoom;
-window.addEventListener('resize', applyZoom);
+$('zoom').onchange = () => applyZoom();
 
 // ---------- export with DPI metadata ----------
 const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
@@ -696,11 +820,12 @@ function jpegWithDpi(buf, pxPerCm) {
   return new Blob([b.subarray(0, 2), app0, b.subarray(2)], { type: 'image/jpeg' });
 }
 async function exportBlob() {
-  const fmt = settings.format;
-  let c = outCanvas;
+  const fmt = settings.format, f = cur();
+  let c = rotated(renderBase(f, 1, false).base, f.rot);           // full resolution
   if (fmt === 'jpeg') {             // JPEG has no transparency: put areas outside the photo on white
-    c = document.createElement('canvas'); c.width = outCanvas.width; c.height = outCanvas.height;
-    const x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height); x.drawImage(outCanvas, 0, 0);
+    const w = document.createElement('canvas'); w.width = c.width; w.height = c.height;
+    const x = w.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, w.width, w.height); x.drawImage(c, 0, 0);
+    c = w;
   }
   const raw = await new Promise(r => c.toBlob(r, fmt === 'png' ? 'image/png' : 'image/jpeg', 0.95));
   const buf = await raw.arrayBuffer();
@@ -709,7 +834,8 @@ async function exportBlob() {
 
 $('downloadBtn').onclick = async () => {
   const f = cur(); if (!f || !f.out) return;
-  setStatus('Encoding…');
+  setStatus('Rendering full resolution…');
+  await new Promise(r => setTimeout(r, 30));      // let the status paint
   const blob = await exportBlob();
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
