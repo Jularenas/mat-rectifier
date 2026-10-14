@@ -37,10 +37,21 @@
   #drop { border: 2px dashed var(--line); border-radius: 10px; padding: 28px 12px; text-align: center;
           color: var(--muted); cursor: pointer; }
   #drop.over { border-color: var(--accent); color: var(--accent); }
-  #editorWrap { position: relative; touch-action: none; }
+  #editorWrap { position: relative; }
+  /* no iOS long-press callout / text selection while dragging handles */
+  #editor { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  button, select, input, label { touch-action: manipulation; }   /* no double-tap zoom on controls */
+  /* touch screens: 16px text stops iOS zooming into fields, taller targets for fingers */
+  @media (pointer: coarse) {
+    button, select, input[type=number] { font-size: 16px; min-height: 40px; }
+    input[type=checkbox] { width: 20px; height: 20px; }
+  }
   #editor { width: 100%; display: block; border-radius: 6px; cursor: crosshair; }
   #loupe { position: fixed; width: 180px; height: 180px; border: 2px solid var(--accent); border-radius: 50%;
            pointer-events: none; display: none; z-index: 10; background: #000; }
+  /* live result while dragging, when the result panel is off-screen (one-column layouts) */
+  #mini { position: fixed; bottom: 12px; display: none; z-index: 10; pointer-events: none; border-radius: 6px;
+          box-shadow: 0 2px 12px rgba(0,0,0,.35); background: #fff; max-width: 34vw; max-height: 40vh; }
   #resultScroll { overflow: auto; max-height: 78vh; border-radius: 6px; background: repeating-conic-gradient(#8882 0 25%, transparent 0 50%) 0 0/16px 16px; }
   #resultStack { position: relative; transform-origin: 0 0; }
   #resultStack canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
@@ -63,7 +74,7 @@
 <main>
   <section>
     <h2>1 · Photo</h2>
-    <div id="drop">Drop photos here or click to choose<input id="fileInput" type="file" accept="image/*" multiple hidden></div>
+    <div id="drop"><span id="dropText">Drop photos here or click to choose</span><input id="fileInput" type="file" accept="image/*" multiple hidden></div>
     <div id="editorWrap" hidden><canvas id="editor"></canvas></div>
     <div class="row" style="margin-top:8px">
       <label>Method <select id="mode">
@@ -112,6 +123,7 @@
     <div class="row">
       <button id="resetCropBtn" disabled title="Undo your edge adjustments">Reset edges</button>
       <button id="downloadBtn" class="primary" disabled>Download</button>
+      <button id="shareBtn" disabled hidden title="Send to Procreate, Files or Photos">Share…</button>
       <label>Zoom <select id="zoom">
         <option value="fit">Fit</option><option value="0.25">25%</option><option value="0.5">50%</option>
         <option value="1">100%</option><option value="2">200%</option></select></label>
@@ -127,6 +139,7 @@
   </section>
 </main>
 <canvas id="loupe" width="180" height="180"></canvas>
+<canvas id="mini"></canvas>
 
 <script src="grid.js"></script>
 <script>
@@ -135,7 +148,7 @@
 const DEFAULTS = { mode: 'grid', crop: 'grid', matLong: 120, matShort: 45, pxcm: 50, format: 'png',
                    hmin: 60, hmax: 100, smin: 50, vmin: 40, vmax: 235 };
 const SETTING_KEYS = Object.keys(DEFAULTS);
-const REANALYSE = new Set(['mode', 'crop', 'hmin', 'hmax', 'smin', 'vmin', 'vmax']);
+const REANALYSE = new Set(['mode', 'hmin', 'hmax', 'smin', 'vmin', 'vmax']);   // need a new detection
 let settings = { ...DEFAULTS };
 try { Object.assign(settings, JSON.parse(localStorage.getItem('matRectifier.settings') || '{}')); } catch (e) {}
 const $ = id => document.getElementById(id);
@@ -156,7 +169,18 @@ for (const k of SETTING_KEYS) {
     settings[k] = el.type === 'number' ? parseFloat(el.value) || DEFAULTS[k] : el.value;
     saveSettings(); syncSettingsUI();
     const f = cur(); if (!f || !cvReady) return;
-    if (REANALYSE.has(k)) { files.forEach(x => (x.analysed = false)); analyse(f); }
+    if (k === 'crop') {                  // same grid, different crop: no new detection needed
+      files.forEach(x => { x.crop = null; x.note = ''; });
+      if (settings.crop === 'edge' && f.grid && f.grid.ok && !edgeRect(f))
+        f.note = 'The mat edges are not visible in this photo, so it is cropped to the visible grid instead.';
+    }
+    if (REANALYSE.has(k)) {
+      files.forEach(x => (x.analysed = false));
+      setStatus('Detecting…');
+      setTimeout(() => { if (cur() !== f) return; analyse(f); drawEditor(); render(); }, 30);
+      drawEditor();
+      return;
+    }
     drawEditor(); render();
   });
 }
@@ -194,11 +218,36 @@ drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('
 document.addEventListener('dragover', e => e.preventDefault());
 document.addEventListener('drop', e => { e.preventDefault(); if (e.target !== drop) addFiles(e.dataTransfer.files); });
 
+function loadViaImg(file) {
+  return new Promise(res => {
+    const img = new Image(), url = URL.createObjectURL(file);
+    img.onload = () => {
+      const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight;
+      c.getContext('2d').drawImage(img, 0, 0); URL.revokeObjectURL(url); res(c);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); res(null); };
+    img.src = url;
+  });
+}
+
 async function addFiles(list) {
   const first = files.length;
   for (const f of list) {
     if (!f.type.startsWith('image/')) continue;
-    const bitmap = await createImageBitmap(f, { imageOrientation: 'from-image' });
+    let bitmap;
+    try { bitmap = await createImageBitmap(f, { imageOrientation: 'from-image' }); }
+    catch (e) { bitmap = await loadViaImg(f); }   // older Safari: decode through an <img> instead
+    if (!bitmap) { setStatus(`Could not open ${f.name}.`, true); continue; }
+    // iPhone/iPad Safari can't use canvases above ~16.7 MP (24/48 MP photos): scale those down
+    const MAXPX = 16e6;
+    if (bitmap.width * bitmap.height > MAXPX) {
+      const k = Math.sqrt(MAXPX / (bitmap.width * bitmap.height));
+      const c = document.createElement('canvas');
+      c.width = Math.floor(bitmap.width * k); c.height = Math.floor(bitmap.height * k);
+      const x = c.getContext('2d'); x.imageSmoothingQuality = 'high'; x.drawImage(bitmap, 0, 0, c.width, c.height);
+      if (bitmap.close) bitmap.close();
+      bitmap = c;                        // a canvas works anywhere the bitmap is used
+    }
     files.push({ name: f.name.replace(/\.[^.]+$/, ''), bitmap, analysed: false, grid: null, quad: null, rot: 0, out: null });
   }
   if (files.length > first) select(first);
@@ -228,7 +277,7 @@ function updateButtons() {
   $('prevBtn').disabled = idx <= 0;
   $('nextBtn').disabled = idx >= files.length - 1;
   for (const b of ['detectBtn', 'rotateBtn', 'resetCropBtn']) $(b).disabled = !(has && cvReady);
-  $('downloadBtn').disabled = !(has && cur().out);
+  $('downloadBtn').disabled = $('shareBtn').disabled = !(has && cur().out);
 }
 
 // ---------- geometry helpers ----------
@@ -438,6 +487,10 @@ let view = { s: 1 };           // full-res px -> css px
 let maskCache = null;
 // drag state: { kind: 'corner', i } (manual corners) or { kind: 'crop', sides: ['u0'|'u1'|'v0'|'v1', ...] }
 let drag = null;
+// fingers need bigger handles and hit areas than a mouse
+const COARSE = window.matchMedia && matchMedia('(pointer: coarse)').matches;
+const HS = COARSE ? 12 : 9, HIT = COARSE ? 30 : 15;
+if (COARSE) $('dropText').textContent = 'Tap to choose photos';
 
 // crop rectangle sides as polylines in editor css px (grid methods)
 function cropSides(f) {
@@ -495,17 +548,17 @@ function drawEditor() {
     sides.forEach((pl, i) => {
       const p = pl[pl.length >> 1], on = active.length === 1 && active[0] === names[i];
       ectx.fillStyle = on ? '#ffd400' : '#fff'; ectx.strokeStyle = '#ff2d95'; ectx.lineWidth = 2;
-      ectx.beginPath(); ectx.roundRect(p[0] - 9, p[1] - 9, 18, 18, 4); ectx.fill(); ectx.stroke();
+      ectx.beginPath(); ectx.rect(p[0] - HS, p[1] - HS, 2 * HS, 2 * HS); ectx.fill(); ectx.stroke();
       const c = pl[0], onC = active.length === 2 && active.includes(names[i]) && active.includes(names[(i + 3) % 4]);
       ectx.fillStyle = onC ? '#ffd400' : '#fff';
-      ectx.beginPath(); ectx.arc(c[0], c[1], 7, 0, Math.PI * 2); ectx.fill(); ectx.stroke();
+      ectx.beginPath(); ectx.arc(c[0], c[1], HS - 2, 0, Math.PI * 2); ectx.fill(); ectx.stroke();
     });
   } else {
     const q = f.quad.map(p => [p[0] * s, p[1] * s]);
     strokeSides([[q[0], q[1]], [q[1], q[2]], [q[2], q[3]], [q[3], q[0]]]);
     const labels = ['TL', 'TR', 'BR', 'BL'];
     q.forEach((p, i) => {
-      ectx.beginPath(); ectx.arc(p[0], p[1], 9, 0, Math.PI * 2);
+      ectx.beginPath(); ectx.arc(p[0], p[1], HS, 0, Math.PI * 2);
       ectx.fillStyle = drag && drag.i === i ? '#ffd400' : 'rgba(255,255,255,.9)'; ectx.fill();
       ectx.lineWidth = 2; ectx.strokeStyle = '#ff2d95'; ectx.stroke();
       ectx.fillStyle = '#ff2d95'; ectx.font = 'bold 11px system-ui';
@@ -556,29 +609,39 @@ const distToPolyline = (p, pl) => {
   return best;
 };
 let dragOffset = [0, 0];
-editor.addEventListener('pointerdown', e => {
-  const f = cur(); if (!f || !f.analysed) return;
-  const meth = method(f), r = editor.getBoundingClientRect(), pc = [e.clientX - r.left, e.clientY - r.top];
-  if (meth === 'corners') {
-    const p = evtToImg(e);
-    let bi = -1, bd = 28 / view.s;
-    f.quad.forEach((q, i) => { const d = dist(p, q); if (d < bd) { bd = d; bi = i; } });
-    if (bi < 0) return;
-    drag = { kind: 'corner', i: bi };
-    dragOffset = [f.quad[bi][0] - p[0], f.quad[bi][1] - p[1]];
-  } else {
-    const sides = cropSides(f), names = ['v0', 'u1', 'v1', 'u0'];
-    // corners first (drag two sides), then the nearest side
-    let pick = null;
-    sides.forEach((pl, i) => { if (!pick && dist(pc, pl[0]) < 16) pick = [names[i], names[(i + 3) % 4]]; });
-    if (!pick) {
-      let bd = 14;
-      sides.forEach((pl, i) => { const d = distToPolyline(pc, pl); if (d < bd) { bd = d; pick = [names[i]]; } });
-    }
-    if (!pick) return;
-    if (!f.crop) f.crop = { ...uvRect(f) };
-    drag = { kind: 'crop', sides: pick };
+// what a press at client point (cx, cy) would grab, or null
+function hitTest(f, cx, cy) {
+  if (!f || !f.analysed) return null;
+  const r = editor.getBoundingClientRect(), pc = [cx - r.left, cy - r.top];
+  if (method(f) === 'corners') {
+    let bi = -1, bd = HIT;
+    f.quad.forEach((q, i) => { const d = dist(pc, [q[0] * view.s, q[1] * view.s]); if (d < bd) { bd = d; bi = i; } });
+    return bi < 0 ? null : { kind: 'corner', i: bi };
   }
+  const sides = cropSides(f), names = ['v0', 'u1', 'v1', 'u0'];
+  // corners first (drag two sides), then the nearest side
+  let pick = null, bd = HIT;
+  sides.forEach((pl, i) => { const d = dist(pc, pl[0]); if (d < bd) { bd = d; pick = [names[i], names[(i + 3) % 4]]; } });
+  if (!pick) {
+    bd = HIT;
+    sides.forEach((pl, i) => { const d = distToPolyline(pc, pl); if (d < bd) { bd = d; pick = [names[i]]; } });
+  }
+  return pick ? { kind: 'crop', sides: pick } : null;
+}
+// Touch: only a press on a handle/outline grabs the gesture; anywhere else the page scrolls normally.
+editor.addEventListener('touchstart', e => {
+  const t = e.touches[0];
+  if (e.touches.length === 1 && hitTest(cur(), t.clientX, t.clientY)) e.preventDefault();
+}, { passive: false });
+editor.addEventListener('touchmove', e => { if (drag) e.preventDefault(); }, { passive: false });
+editor.addEventListener('pointerdown', e => {
+  const f = cur(), hit = hitTest(f, e.clientX, e.clientY);
+  if (!hit) return;
+  if (hit.kind === 'corner') {
+    const p = evtToImg(e);
+    dragOffset = [f.quad[hit.i][0] - p[0], f.quad[hit.i][1] - p[1]];
+  } else if (!f.crop) f.crop = { ...uvRect(f) };
+  drag = hit;
   editor.setPointerCapture(e.pointerId);
   e.preventDefault();
   drawLoupe(e); drawEditor();
@@ -588,7 +651,7 @@ editor.addEventListener('pointermove', e => {
   if (!drag) {                                   // hover cursor feedback
     if (!f || !f.analysed || method(f) === 'corners') return;
     const r = editor.getBoundingClientRect(), pc = [e.clientX - r.left, e.clientY - r.top];
-    const near = cropSides(f).some(pl => distToPolyline(pc, pl) < 14);
+    const near = cropSides(f).some(pl => distToPolyline(pc, pl) < HIT);
     editor.style.cursor = near ? 'grab' : 'crosshair';
     return;
   }
@@ -611,7 +674,7 @@ editor.addEventListener('pointermove', e => {
 });
 const endDrag = () => {
   if (!drag) return;
-  drag = null; $('loupe').style.display = 'none';
+  drag = null; $('loupe').style.display = 'none'; $('mini').style.display = 'none';
   drawEditor(); renderSoon();
 };
 editor.addEventListener('pointerup', endDrag);
@@ -622,8 +685,10 @@ function drawLoupe(e) {
   if (drag && drag.kind === 'corner') { pt[0] = f.quad[drag.i][0]; pt[1] = f.quad[drag.i][1]; }
   const Z = 6, R = 90;
   L.style.display = 'block';
-  L.style.left = Math.min(window.innerWidth - 190, e.clientX + 30) + 'px';
-  L.style.top = Math.max(10, e.clientY - 210) + 'px';
+  // beside the finger/pointer (never under it), on the side with more room
+  const room = e.clientX > window.innerWidth / 2;
+  L.style.left = Math.max(4, Math.min(window.innerWidth - 184, room ? e.clientX - 214 : e.clientX + 34)) + 'px';
+  L.style.top = Math.max(4, Math.min(window.innerHeight - 184, e.clientY - 90)) + 'px';
   lc.imageSmoothingEnabled = false;
   lc.fillStyle = '#000'; lc.fillRect(0, 0, 180, 180);
   lc.drawImage(f.bitmap, pt[0] - R / Z, pt[1] - R / Z, 2 * R / Z, 2 * R / Z, 0, 0, 180, 180);
@@ -667,7 +732,8 @@ function outputGeom(f) {
 function renderBase(f, k, fast) {
   const geo = outputGeom(f), S = settings.pxcm * k;
   const W = Math.max(1, Math.round(geo.W * k)), H = Math.max(1, Math.round(geo.H * k));
-  if (W * H > 150e6) throw new Error(`output would be ${W}×${H} px`);
+  // ~16.7 MP is the largest canvas iPhone/iPad Safari can draw
+  if (W * H > 16.7e6) throw new Error(`output would be ${W}×${H} px, too large for phones/tablets; lower "px per cm" in Settings`);
   // smallest source level that still keeps ≥ 1.5 photo px per output px (no aliasing, less work)
   const photoPxPerCm = method(f) === 'corners'
     ? (dist(f.quad[0], f.quad[1]) + dist(f.quad[3], f.quad[2])) / 2 / geo.wcm : f.grid.spacingPx;
@@ -731,9 +797,29 @@ function renderPreview(fast) {
   }
   const [wcm, hcm] = r % 2 ? [geo.hcm, geo.wcm] : [geo.wcm, geo.hcm];
   drawGrid();
+  showMini();
   $('outInfo').textContent = `${f.out.w}×${f.out.h} px · ${+wcm.toFixed(2)}×${+hcm.toFixed(2)} cm · ${settings.pxcm} px/cm · ${+(settings.pxcm * 2.54).toFixed(3)} DPI`;
   if (!fast) { setStatus(`Ready (preview ${Math.round(performance.now() - t0)} ms).`); updateDetInfo(f); }
   updateButtons();
+}
+
+// While dragging, if the result panel isn't on screen, float a small copy of it in the corner
+// opposite the magnifier so the effect of the drag is visible.
+function showMini() {
+  const mini = $('mini');
+  if (!drag) { mini.style.display = 'none'; return; }
+  const box = $('resultScroll').getBoundingClientRect();
+  if (box.top < window.innerHeight - 80 && box.bottom > 80) { mini.style.display = 'none'; return; }
+  const maxW = Math.min(150, window.innerWidth * 0.34), maxH = window.innerHeight * 0.4;
+  const k = Math.min(maxW / outCanvas.width, maxH / outCanvas.height), dpr = window.devicePixelRatio || 1;
+  mini.width = Math.round(outCanvas.width * k * dpr); mini.height = Math.round(outCanvas.height * k * dpr);
+  mini.style.width = mini.width / dpr + 'px'; mini.style.height = mini.height / dpr + 'px';
+  const x = mini.getContext('2d');
+  x.drawImage(outCanvas, 0, 0, mini.width, mini.height);
+  x.drawImage(gridCanvas, 0, 0, mini.width, mini.height);
+  const loupeLeft = parseFloat($('loupe').style.left) < window.innerWidth / 2;
+  mini.style.left = loupeLeft ? '' : '12px'; mini.style.right = loupeLeft ? '12px' : '';
+  mini.style.display = 'block';
 }
 
 // coalesce bursts of changes (pointer moves) into one preview render per event-loop turn
@@ -821,27 +907,67 @@ function jpegWithDpi(buf, pxPerCm) {
 }
 async function exportBlob() {
   const fmt = settings.format, f = cur();
-  let c = rotated(renderBase(f, 1, false).base, f.rot);           // full resolution
+  const { base } = renderBase(f, 1, false);                         // full resolution
+  let c = f.rot ? rotated(base, f.rot) : base;
+  if (c !== base) base.width = base.height = 0;                    // free memory early (matters on iOS)
   if (fmt === 'jpeg') {             // JPEG has no transparency: put areas outside the photo on white
     const w = document.createElement('canvas'); w.width = c.width; w.height = c.height;
     const x = w.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, w.width, w.height); x.drawImage(c, 0, 0);
-    c = w;
+    c.width = c.height = 0; c = w;
   }
   const raw = await new Promise(r => c.toBlob(r, fmt === 'png' ? 'image/png' : 'image/jpeg', 0.95));
+  c.width = c.height = 0;
+  if (!raw) throw new Error('the browser could not encode the image (out of memory?)');
   const buf = await raw.arrayBuffer();
   return fmt === 'png' ? pngWithDpi(buf, settings.pxcm) : jpegWithDpi(buf, settings.pxcm);
 }
 
-$('downloadBtn').onclick = async () => {
-  const f = cur(); if (!f || !f.out) return;
+// The full-resolution file for the current file + settings, cached so Share can be called right
+// inside a tap (iOS only allows the share sheet during the user gesture).
+let exportCache = null;
+const exportKey = f => JSON.stringify([files.indexOf(f), f.rot, f.crop, f.quad, settings.pxcm, settings.format, settings.mode, settings.crop]);
+async function getExport() {
+  const f = cur(), key = exportKey(f);
+  if (exportCache && exportCache.key === key) return exportCache;
   setStatus('Rendering full resolution…');
   await new Promise(r => setTimeout(r, 30));      // let the status paint
   const blob = await exportBlob();
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `${f.name}_rect_${settings.pxcm}pxcm.${settings.format === 'png' ? 'png' : 'jpg'}`;
-  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-  setStatus(`Downloaded (${(blob.size / 1e6).toFixed(1)} MB).`);
+  const name = `${f.name}_rect_${settings.pxcm}pxcm.${settings.format === 'png' ? 'png' : 'jpg'}`;
+  exportCache = { key, blob, name };
+  return exportCache;
+}
+
+$('downloadBtn').onclick = async () => {
+  const f = cur(); if (!f || !f.out) return;
+  try {
+    const { blob, name } = await getExport();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    setStatus(`Downloaded (${(blob.size / 1e6).toFixed(1)} MB).`);
+  } catch (e) { console.error(e); setStatus('Could not export: ' + e.message, true); }
+};
+
+// Share sheet (iPhone/iPad: send straight to Procreate, Files or Photos)
+const canShareFiles = () => {
+  try { return !!(navigator.canShare && navigator.canShare({ files: [new File([''], 'x.png', { type: 'image/png' })] })); }
+  catch (e) { return false; }
+};
+if (canShareFiles()) $('shareBtn').hidden = false;
+$('shareBtn').onclick = async () => {
+  const f = cur(); if (!f || !f.out) return;
+  const ready = exportCache && exportCache.key === exportKey(f);
+  try {
+    const { blob, name } = await getExport();
+    await navigator.share({ files: [new File([blob], name, { type: blob.type })] });
+    setStatus('Shared.');
+  } catch (e) {
+    if (e.name === 'AbortError') { setStatus('Share cancelled.'); return; }
+    // rendering took longer than the tap allows: the file is ready now, a second tap shares at once
+    if (!ready && e.name === 'NotAllowedError') setStatus('File ready. Tap Share again.', true);
+    else { console.error(e); setStatus('Could not share: ' + e.message, true); }
+  }
 };
 
 // debug / testing hooks

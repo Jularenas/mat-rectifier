@@ -19,6 +19,12 @@ Turns a phone photo of a pattern piece on the green cutting mat into a flat imag
 
 If the grid can't be found (very blurry or very small mat in the photo), the page falls back to **Manual: 4 mat corners**. In that mode you drag the 4 points onto the mat corners (with a magnifier), and the photo should be shot from straight above.
 
+## On iPhone / iPad
+- Works in Safari: tap *Tap to choose photos* to pick from Photos or Files (several at once is fine).
+- Drag the pink outline's sides or corners with a finger; swiping elsewhere on the photo scrolls the page. While dragging, a magnifier shows beside your finger and, on narrow screens, a small live copy of the result appears in the corner.
+- **Share…** sends the PNG straight to Procreate, Files or Photos. If the first tap only prepares the file (big images take a couple of seconds), tap Share again.
+- Photos above ~16 megapixels (24/48 MP iPhone shots) are scaled to 16 MP on load, the largest size Safari can process; that is still far more detail than the 50 px/cm output needs.
+
 ## Scale
 - Default **50 px per cm**, written into the PNG as **127 DPI** (50 × 2.54), which is what Procreate uses to measure in cm. Change the px/cm under Settings; the DPI follows.
 
