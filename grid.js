@@ -239,9 +239,28 @@ const Grid = (() => {
 
   // The sweep validates every crossing on the image itself, so keep crossings the global model
   // can't explain if a smooth local mesh can; only trim points that disagree with their neighbourhood.
+  // A real crossing agrees with its neighbours: predicted from each found neighbour (neighbour +
+  // model step) it lands within ~1 mm. False crossings (radial "starburst" lines, text, paper
+  // marks) don't; nor do isolated singles, which can't be verified.
+  function neighbourConsistent(model, pts, spacing) {
+    const byK = new Map(pts.map(m => [m.u + ',' + m.v, m])), tol = 0.1 * spacing;
+    return pts.filter(m => {
+      const pm = model.forward(m.u, m.v);
+      let agree = 0;
+      for (const [du, dv] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const n = byK.get((m.u + du) + ',' + (m.v + dv)); if (!n) continue;
+        const pn = model.forward(n.u, n.v);
+        if (Math.hypot(m.x - (n.x + pm[0] - pn[0]), m.y - (n.y + pm[1] - pn[1])) < tol) agree++;
+      }
+      return agree >= 2;
+    });
+  }
+
   function finalFit(model, all) {
-    let pts = all;
     const spacing = medianSpacing(all);
+    const checked = neighbourConsistent(model, all, spacing);
+    if (checked.length >= 30) all = checked;
+    let pts = all;
     for (let k = 0; k < 2; k++) {
       const mesh = fitMesh(model, pts, 2, 0.5);
       if (!mesh) break;
@@ -315,22 +334,44 @@ const Grid = (() => {
     const d1 = [e1[0] / L1, e1[1] / L1], d2 = [e2[0] / L2, e2[1] / L2];
     const n1 = [-d1[1], d1[0]], n2 = [-d2[1], d2[0]];
     const fit = (d, n, along, across) => {
-      const S = [], O = [], h = 0.3 * across;
-      for (const f of [-0.45, -0.38, -0.31, 0.31, 0.38, 0.45]) {
-        const sa = f * along, bx = q[0] + d[0] * sa, by = q[1] + d[1] * sa;
+      const S = [], O = [], h = 0.3 * across, step = 0.25;
+      for (let f = 0.28; f <= 0.461; f += 0.03) for (const sg of [-1, 1]) {
+        const sa = sg * f * along, bx = q[0] + d[0] * sa, by = q[1] + d[1] * sa;
         const vals = [];
-        for (let o = -h; o <= h + 1e-9; o += 0.5) vals.push([o, bil(t, W, H, bx + n[0] * o, by + n[1] * o)]);
-        let mn = Infinity; for (const v of vals) mn = Math.min(mn, v[1]);
+        for (let o = -h; o <= h + 1e-9; o += step) vals.push([o, bil(t, W, H, bx + n[0] * o, by + n[1] * o)]);
+        // line centre = centroid of the line's core: subtract a linear background (glare, shading)
+        // through the profile ends, then use only samples above half of the peak
+        const m = vals.length, e = Math.max(2, Math.round(m * 0.12));
+        let l0 = 0, r0 = 0, lo = 0, ro = 0;
+        for (let k = 0; k < e; k++) { l0 += vals[k][1]; lo += vals[k][0]; r0 += vals[m - 1 - k][1]; ro += vals[m - 1 - k][0]; }
+        l0 /= e; lo /= e; r0 /= e; ro /= e;
+        const w = vals.map(([o, v]) => v - (l0 + (r0 - l0) * (o - lo) / (ro - lo)));
+        let pk = 0; for (let k = 1; k < m; k++) if (w[k] > w[pk]) pk = k;
+        if (!(w[pk] > 0)) continue;
+        const half = 0.5 * w[pk];
+        let a0 = pk, a1 = pk;
+        while (a0 > 0 && w[a0 - 1] > half) a0--;
+        while (a1 < m - 1 && w[a1 + 1] > half) a1++;
+        if (a0 === 0 || a1 === m - 1) continue;          // line not contained in the window
         let sw = 0, so = 0;
-        for (const [o, v] of vals) { const w = (v - mn) ** 2; sw += w; so += w * o; }
+        for (let k = a0; k <= a1; k++) { const ww = w[k] - half; sw += ww; so += ww * vals[k][0]; }
         if (sw > 0) { S.push(sa); O.push(so / sw); }
       }
-      if (S.length < 4) return null;
-      let ms = 0, mo = 0; for (let k = 0; k < S.length; k++) { ms += S[k]; mo += O[k]; }
-      ms /= S.length; mo /= S.length;
-      let sso = 0, sss = 0; for (let k = 0; k < S.length; k++) { sso += (S[k] - ms) * (O[k] - mo); sss += (S[k] - ms) ** 2; }
-      const bb = sss ? sso / sss : 0;
-      return { a: mo - bb * ms, b: bb };
+      if (S.length < 6) return null;
+      const ls = idx => {
+        let ms = 0, mo = 0; for (const k of idx) { ms += S[k]; mo += O[k]; }
+        ms /= idx.length; mo /= idx.length;
+        let sso = 0, sss = 0; for (const k of idx) { sso += (S[k] - ms) * (O[k] - mo); sss += (S[k] - ms) ** 2; }
+        const bb = sss ? sso / sss : 0;
+        return { a: mo - bb * ms, b: bb };
+      };
+      let L = ls(S.map((_, k) => k));
+      // one robust pass: drop samples disturbed by printed text or ticks next to the line
+      const res = S.map((sv, k) => Math.abs(O[k] - (L.a + L.b * sv)));
+      const med = [...res].sort((x, y) => x - y)[res.length >> 1];
+      const keep = S.map((_, k) => k).filter(k => res[k] <= Math.max(0.15, 3 * med));
+      if (keep.length >= 5 && keep.length < S.length) L = ls(keep);
+      return L;
     };
     const A = fit(d1, n1, L1, L2), B = fit(d2, n2, L2, L1);
     if (!A || !B) return null;
@@ -622,13 +663,22 @@ const Grid = (() => {
   }
 
   // ---------- main entry ----------
-  // bitmap → { model (analysis coords), sc, W, H, matches, rmsMm, spacingPx, visible:{u0,u1,v0,v1} }
+  // bitmap → { model (analysis coords), sc/scY (analysis px per photo px, per axis), W, H, matches, rmsMm, spacingPx, visible:{u0,u1,v0,v1} }
+  // Very close shots draw the grid with huge squares (tens of px per cm), which the line filters
+  // aren't sized for: if locking on fails, retry on a smaller analysis image.
   function detect(bitmap, maskFn, maxDim = 1600) {
+    const r = detectAt(bitmap, maskFn, maxDim);
+    if (r.ok || maxDim <= 700) return r;
+    const r2 = detectAt(bitmap, maskFn, Math.round(maxDim / 2));
+    return r2.ok ? r2 : r;
+  }
+  function detectAt(bitmap, maskFn, maxDim) {
     const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
     const c = document.createElement('canvas');
     c.width = Math.round(bitmap.width * scale); c.height = Math.round(bitmap.height * scale);
     c.getContext('2d').drawImage(bitmap, 0, 0, c.width, c.height);
-    const sc = c.width / bitmap.width, W = c.width, H = c.height;
+    // per-axis scales: width and height are rounded separately, so they can differ slightly
+    const sc = c.width / bitmap.width, scY = c.height / bitmap.height, W = c.width, H = c.height;
     const src = cv.imread(c);
     const mask = maskFn(src);
     const gray = new cv.Mat(), th = new cv.Mat(), tb = new cv.Mat(), masked = cv.Mat.zeros(H, W, cv.CV_8UC1);
@@ -660,7 +710,7 @@ const Grid = (() => {
     let outline = regions.flat();
     [src, mask, gray, th, tb, masked, k, corners, contours, hier].forEach(m => m.delete());
 
-    const fail = reason => ({ ok: false, reason, sc, W, H, candidates: pts.length });
+    const fail = reason => ({ ok: false, reason, sc, scY, W, H, candidates: pts.length });
     if (pts.length < 30 || !outline.length) return fail('no grid lines found on the green area');
     let mx = 0, my = 0; for (const p of outline) { mx += p[0]; my += p[1]; }
     const lattice = buildLattice(pts, t, W, H, [mx / outline.length, my / outline.length], 10);
@@ -697,7 +747,7 @@ const Grid = (() => {
     // the photo's own border is not a mat edge
     const edges = matEdges(model, outline.filter(p => p[0] > 2 && p[1] > 2 && p[0] < W - 3 && p[1] < H - 3), inl);
     return {
-      ok: true, model, sc, W, H, matches: inl, candidates: pts.length,
+      ok: true, model, sc, scY, W, H, matches: inl, candidates: pts.length,
       rmsMm: Math.sqrt(se / inl.length) * 10, p95Mm: errs[Math.floor(errs.length * 0.95)] * 10,
       spacingPx: medianSpacing(inl) / sc, visible, edges, lam: model.lam, outline, mesh: model.meshStep || 0,
     };
@@ -766,7 +816,7 @@ const Grid = (() => {
   }
 
   // output pixel grid → analysis-image coordinates, written into ax/ay (Float32Array) for rows y0..y0+rows
-  function fillMaps(model, r, S, y0, rows, W, ax, ay, sc) {
+  function fillMaps(model, r, S, y0, rows, W, ax, ay, sc, scY = sc) {
     const [[h00, h01, h02], [h10, h11, h12], [h20, h21, h22]] = model.H, lam = model.lam, [cx, cy] = model.c, R = model.R, m = model.corr;
     for (let yy = 0, i = 0; yy < rows; yy++) {
       const v = r.v0 + (y0 + yy + 0.5) / S;
@@ -790,7 +840,7 @@ const Grid = (() => {
           px += (m.dx[k] * (1 - a) + m.dx[k + 1] * a) * (1 - b) + (m.dx[k2] * (1 - a) + m.dx[k2 + 1] * a) * b;
           py += (m.dy[k] * (1 - a) + m.dy[k + 1] * a) * (1 - b) + (m.dy[k2] * (1 - a) + m.dy[k2 + 1] * a) * b;
         }
-        ax[i] = (px + 0.5) / sc - 0.5; ay[i] = (py + 0.5) / sc - 0.5;   // analysis → full-res pixel centres
+        ax[i] = (px + 0.5) / sc - 0.5; ay[i] = (py + 0.5) / scY - 0.5;  // analysis → full-res pixel centres
       }
     }
   }

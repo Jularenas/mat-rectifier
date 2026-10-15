@@ -484,8 +484,8 @@ $('detectBtn').onclick = () => { const f = cur(); setStatus('Detecting…'); set
 $('rotateBtn').onclick = () => { const f = cur(); f.rot = (f.rot + 1) % 4; drawEditor(); render(); };
 
 // conversions between full-res pixel-edge coords (editor / quad) and grid analysis coords
-const toAna = (g, X, Y) => [X * g.sc - 0.5, Y * g.sc - 0.5];
-const fromAna = (g, x, y) => [(x + 0.5) / g.sc, (y + 0.5) / g.sc];
+const toAna = (g, X, Y) => [X * g.sc - 0.5, Y * g.scY - 0.5];
+const fromAna = (g, x, y) => [(x + 0.5) / g.sc, (y + 0.5) / g.scY];
 
 // output rectangle in grid cm coordinates for the current method
 function uvRect(f) {
@@ -587,7 +587,7 @@ function drawEditor() {
   };
   if (meth.startsWith('grid')) {
     const g = f.grid;
-    if ($('showPts').checked && !(drag && drag.kind !== 'pan' && drag.kind !== 'pinch')) {
+    if ($('showPts').checked) {                // detected grid stays visible while adjusting edges
       ectx.fillStyle = 'rgba(0,229,255,.9)';
       const d = view.z > 3 ? 2.5 : 1.5;
       for (const m of g.matches) {
@@ -897,12 +897,12 @@ function renderBase(f, k, fast) {
     [dst, sp, dp, Mx].forEach(m => m.delete());
   } else {
     // every output pixel → (u,v) cm → photo pixel through the fitted model
-    const g = f.grid, r = geo.r, sc = g.sc / lv;      // analysis coords → this source level
+    const g = f.grid, r = geo.r, sc = g.sc / lv, scY = g.scY / lv;   // analysis coords → this source level
     const STRIP = 256;
     for (let y0 = 0; y0 < H; y0 += STRIP) {
       const rows = Math.min(STRIP, H - y0);
       const mx = new cv.Mat(rows, W, cv.CV_32FC1), my = new cv.Mat(rows, W, cv.CV_32FC1), dst = new cv.Mat();
-      Grid.fillMaps(g.model, r, S, y0, rows, W, mx.data32F, my.data32F, sc);
+      Grid.fillMaps(g.model, r, S, y0, rows, W, mx.data32F, my.data32F, sc, scY);
       cv.remap(src, dst, mx, my, interp, cv.BORDER_CONSTANT, new cv.Scalar(0, 0, 0, 0));
       bctx.putImageData(new ImageData(new Uint8ClampedArray(dst.data), W, rows), 0, y0);
       [mx, my, dst].forEach(m => m.delete());
